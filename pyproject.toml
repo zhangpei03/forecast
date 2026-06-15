@@ -1,0 +1,43 @@
+[project]
+name = "finance-forecast-lab"
+version = "0.1.0"
+description = "Enterprise finance forecasting evaluation lab powered by Streamlit and AutoGluon TimeSeries."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "streamlit>=1.58,<1.59",
+  "autogluon.timeseries>=1.5,<1.6",
+  "pandas>=2.2,<3",
+  "numpy>=1.26,<3",
+  "pyarrow>=18,<22",
+  "openpyxl>=3.1,<4",
+  "plotly>=6.0,<7",
+  "pydantic>=2.10,<3",
+  "python-dotenv>=1.0,<2",
+  "prophet>=1.1,<2",
+  "statsforecast>=2,<3",
+  "xgboost>=2,<4",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8,<9",
+  "ruff>=0.11,<1",
+  "mypy>=1.15,<2",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "RUF"]
+ignore = ["E501", "RUF001", "RUF012"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
