@@ -4,12 +4,20 @@ import contextlib
 import io
 import logging
 import warnings
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 
 from src.core.constants import DEFAULT_RANDOM_SEED, SEASONAL_LAG
+from src.domain.models import ForecastDriverConfig
+from src.services.forecast_driver_service import (
+    build_future_known_covariates,
+    historical_covariate_columns,
+    known_covariate_columns,
+    normalize_driver_configs,
+)
 
 CUSTOM_MODEL_NAMES = ("AutoARIMA", "Prophet", "XGBoost")
 
@@ -26,9 +34,11 @@ def generate_custom_model_backtest_predictions(
     freq: str,
     prediction_length: int,
     num_windows: int,
+    driver_configs: Iterable[ForecastDriverConfig | Mapping[str, object]] | None = None,
 ) -> tuple[pd.DataFrame, list[ModelFailure]]:
     failures: list[ModelFailure] = []
     frames: list[pd.DataFrame] = []
+    configs = normalize_driver_configs(driver_configs)
 
     for window_index in range(num_windows):
         train_data, actual_data = _split_window(data, prediction_length, window_index)
@@ -46,6 +56,7 @@ def generate_custom_model_backtest_predictions(
                     freq=freq,
                     prediction_length=prediction_length,
                     window_id=f"W{window_index + 1}",
+                    driver_configs=configs,
                 )
                 if not predictions.empty:
                     frames.append(predictions)
@@ -62,30 +73,36 @@ def generate_custom_model_future_forecast(
     freq: str,
     prediction_length: int,
     model: str,
+    driver_configs: Iterable[ForecastDriverConfig | Mapping[str, object]] | None = None,
 ) -> pd.DataFrame:
+    configs = normalize_driver_configs(driver_configs)
+    actual_data = _future_frame(data, freq, prediction_length, configs)
     if model == "AutoARIMA":
         return _predict_auto_arima(
             train_data=data,
-            actual_data=_future_frame(data, freq, prediction_length),
+            actual_data=actual_data,
             freq=freq,
             prediction_length=prediction_length,
             window_id="FUTURE",
+            driver_configs=configs,
         )
     if model == "Prophet":
         return _predict_prophet(
             train_data=data,
-            actual_data=_future_frame(data, freq, prediction_length),
+            actual_data=actual_data,
             freq=freq,
             prediction_length=prediction_length,
             window_id="FUTURE",
+            driver_configs=configs,
         )
     if model == "XGBoost":
         return _predict_xgboost(
             train_data=data,
-            actual_data=_future_frame(data, freq, prediction_length),
+            actual_data=actual_data,
             freq=freq,
             prediction_length=prediction_length,
             window_id="FUTURE",
+            driver_configs=configs,
         )
     return pd.DataFrame(columns=_columns())
 
@@ -119,6 +136,7 @@ def _predict_auto_arima(
     freq: str,
     prediction_length: int,
     window_id: str,
+    driver_configs: Iterable[ForecastDriverConfig | Mapping[str, object]] | None = None,
 ) -> pd.DataFrame:
     from statsforecast import StatsForecast
     from statsforecast.models import AutoARIMA
@@ -155,14 +173,18 @@ def _predict_prophet(
     freq: str,
     prediction_length: int,
     window_id: str,
+    driver_configs: Iterable[ForecastDriverConfig | Mapping[str, object]] | None = None,
 ) -> pd.DataFrame:
     from prophet import Prophet
 
     frames = []
     prophet_freq = _pandas_freq(freq)
+    known_covariates = _available_covariates(train_data, known_covariate_columns(driver_configs))
     logging.getLogger("cmdstanpy").setLevel(logging.WARNING)
     for item_id, series in train_data.groupby("item_id", sort=True):
-        prophet_data = series.rename(columns={"timestamp": "ds", "target": "y"})[["ds", "y"]]
+        prophet_data = series.rename(columns={"timestamp": "ds", "target": "y"})[
+            ["ds", "y", *known_covariates]
+        ].dropna()
         if prophet_data["y"].nunique() <= 1:
             continue
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
@@ -172,6 +194,8 @@ def _predict_prophet(
                 weekly_seasonality=freq in {"D", "W"},
                 yearly_seasonality=True,
             )
+            for column in known_covariates:
+                model.add_regressor(column)
             model.fit(prophet_data)
         future = pd.DataFrame(
             {
@@ -182,6 +206,17 @@ def _predict_prophet(
                 )[1:]
             }
         )
+        if known_covariates:
+            future_values = actual_data[actual_data["item_id"].eq(item_id)].copy()
+            future_values["timestamp"] = pd.to_datetime(future_values["timestamp"])
+            future = future.merge(
+                future_values[["timestamp", *known_covariates]].rename(columns={"timestamp": "ds"}),
+                on="ds",
+                how="left",
+            )
+            for column in known_covariates:
+                fallback = float(series[column].dropna().iloc[-1])
+                future[column] = pd.to_numeric(future[column], errors="coerce").fillna(fallback)
         forecast = model.predict(future)
         frames.append(
             pd.DataFrame(
@@ -206,14 +241,21 @@ def _predict_xgboost(
     freq: str,
     prediction_length: int,
     window_id: str,
+    driver_configs: Iterable[ForecastDriverConfig | Mapping[str, object]] | None = None,
 ) -> pd.DataFrame:
     from xgboost import XGBRegressor
 
     frames = []
     lag_values = _xgboost_lags(freq)
+    known_covariates = _available_covariates(train_data, known_covariate_columns(driver_configs))
+    historical_covariates = _available_covariates(
+        train_data, historical_covariate_columns(driver_configs)
+    )
     for item_id, series in train_data.groupby("item_id", sort=True):
         series = series.sort_values("timestamp").reset_index(drop=True)
-        supervised = _make_supervised_frame(series, lag_values)
+        supervised = _make_supervised_frame(
+            series, lag_values, known_covariates, historical_covariates
+        )
         if supervised.shape[0] < 10:
             continue
         feature_columns = [column for column in supervised.columns if column != "y"]
@@ -232,9 +274,30 @@ def _predict_xgboost(
             actual_data, item_id, series, freq, prediction_length
         )
         history_values = list(series["target"].astype(float))
+        last_historical_values = {
+            column: float(series[column].dropna().iloc[-1]) for column in historical_covariates
+        }
+        known_values = actual_data[actual_data["item_id"].eq(item_id)].copy()
+        known_values["timestamp"] = pd.to_datetime(known_values["timestamp"])
+        known_values = known_values.set_index("timestamp")
+        known_fallbacks = {
+            column: float(series[column].dropna().iloc[-1]) for column in known_covariates
+        }
         predictions = []
         for timestamp in future_timestamps:
-            features = _feature_row(history_values, pd.Timestamp(timestamp), lag_values)
+            known_at_timestamp = {
+                column: _known_value(
+                    known_values, pd.Timestamp(timestamp), column, known_fallbacks[column]
+                )
+                for column in known_covariates
+            }
+            features = _feature_row(
+                history_values,
+                pd.Timestamp(timestamp),
+                lag_values,
+                known_covariates=known_at_timestamp,
+                historical_covariates=last_historical_values,
+            )
             prediction = float(model.predict(pd.DataFrame([features]))[0])
             predictions.append(prediction)
             history_values.append(prediction)
@@ -286,24 +349,48 @@ def _join_actuals(
     return joined.loc[:, _columns()]
 
 
-def _future_frame(data: pd.DataFrame, freq: str, prediction_length: int) -> pd.DataFrame:
-    frames = []
-    for item_id, series in data.groupby("item_id", sort=True):
-        timestamps = pd.date_range(
-            pd.to_datetime(series["timestamp"]).max(),
-            periods=prediction_length + 1,
-            freq=_pandas_freq(freq),
-        )[1:]
-        frames.append(pd.DataFrame({"item_id": item_id, "timestamp": timestamps, "target": pd.NA}))
-    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+def _future_frame(
+    data: pd.DataFrame,
+    freq: str,
+    prediction_length: int,
+    driver_configs: Iterable[ForecastDriverConfig | Mapping[str, object]] | None,
+) -> pd.DataFrame:
+    future = build_future_known_covariates(
+        data, driver_configs, freq=freq, prediction_length=prediction_length
+    )
+    if future.empty:
+        frames = []
+        for item_id, series in data.groupby("item_id", sort=True):
+            timestamps = pd.date_range(
+                pd.to_datetime(series["timestamp"]).max(),
+                periods=prediction_length + 1,
+                freq=_pandas_freq(freq),
+            )[1:]
+            frames.append(pd.DataFrame({"item_id": item_id, "timestamp": timestamps}))
+        future = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    future["target"] = pd.NA
+    return future
 
 
-def _make_supervised_frame(series: pd.DataFrame, lag_values: list[int]) -> pd.DataFrame:
+def _make_supervised_frame(
+    series: pd.DataFrame,
+    lag_values: list[int],
+    known_covariates: list[str],
+    historical_covariates: list[str],
+) -> pd.DataFrame:
     values = list(series["target"].astype(float))
     rows = []
     for index in range(max(lag_values), len(series)):
         row = _feature_row(
-            values[:index], pd.Timestamp(series["timestamp"].iloc[index]), lag_values
+            values[:index],
+            pd.Timestamp(series["timestamp"].iloc[index]),
+            lag_values,
+            known_covariates={
+                column: float(series[column].iloc[index]) for column in known_covariates
+            },
+            historical_covariates={
+                column: float(series[column].iloc[index - 1]) for column in historical_covariates
+            },
         )
         row["y"] = values[index]
         rows.append(row)
@@ -311,7 +398,12 @@ def _make_supervised_frame(series: pd.DataFrame, lag_values: list[int]) -> pd.Da
 
 
 def _feature_row(
-    history_values: list[float], timestamp: pd.Timestamp, lag_values: list[int]
+    history_values: list[float],
+    timestamp: pd.Timestamp,
+    lag_values: list[int],
+    *,
+    known_covariates: dict[str, float] | None = None,
+    historical_covariates: dict[str, float] | None = None,
 ) -> dict[str, float]:
     row: dict[str, float] = {
         "dayofweek": float(timestamp.dayofweek),
@@ -326,7 +418,29 @@ def _feature_row(
     for window in (3, 7, 14, 30):
         actual_window = min(window, len(history_values))
         row[f"rolling_mean_{window}"] = float(np.mean(history_values[-actual_window:]))
+    for column, value in (known_covariates or {}).items():
+        row[f"known_{column}"] = value
+    for column, value in (historical_covariates or {}).items():
+        row[f"historical_{column}_lag_1"] = value
     return row
+
+
+def _available_covariates(data: pd.DataFrame, columns: list[str]) -> list[str]:
+    return [column for column in columns if column in data and data[column].notna().all()]
+
+
+def _known_value(
+    values: pd.DataFrame,
+    timestamp: pd.Timestamp,
+    column: str,
+    fallback: float,
+) -> float:
+    if timestamp not in values.index or column not in values:
+        return fallback
+    value = values.loc[timestamp, column]
+    if isinstance(value, pd.Series):
+        value = value.iloc[0]
+    return float(value) if pd.notna(value) else fallback
 
 
 def _timestamps_for_item(

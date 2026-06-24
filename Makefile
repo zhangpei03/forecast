@@ -1,4 +1,4 @@
-.PHONY: install run test lint format clean-runtime init-db demo-data
+.PHONY: install run test lint format clean-runtime init-db demo-data didi-example-data
 
 install:
 	uv sync
@@ -22,6 +22,9 @@ init-db:
 
 demo-data:
 	uv run python scripts/generate_demo_data.py
+
+didi-example-data:
+	uv run python -m scripts.generate_didi_example_data
 
 clean-runtime:
 	uv run python scripts/clean_runtime.py

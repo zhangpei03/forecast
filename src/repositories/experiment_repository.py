@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -74,7 +75,7 @@ class ExperimentRepository:
         row_count: int,
     ) -> str:
         now = utc_now_iso()
-        payload = config.__dict__.copy()
+        payload = asdict(config)
         with connect(self.database_path) as connection:
             connection.execute(
                 """

@@ -40,6 +40,11 @@ from src.services.evaluation_service import (
     evaluate_models,
 )
 from src.services.export_service import export_evaluation_workbook
+from src.services.forecast_driver_service import (
+    apply_forecast_driver_adjustments,
+    build_future_driver_assumptions,
+    normalize_driver_configs,
+)
 from src.storage.file_store import get_experiment_dir, read_json, write_json
 from src.storage.parquet import read_parquet, write_parquet
 
@@ -81,6 +86,7 @@ def main() -> None:
         if summary is None:
             raise ForecastLabError("实验不存在或已被删除")
         config = ExperimentConfig(**summary.config)
+        driver_configs = normalize_driver_configs(config.driver_configs)
         normalized_data = read_parquet(experiment_dir / "normalized_data.parquet")
         if normalized_data.empty:
             raise ForecastLabError("标准化数据不存在，请重新上传并保存实验")
@@ -101,6 +107,7 @@ def main() -> None:
             freq=config.freq,
             prediction_length=config.prediction_length,
             num_windows=config.num_val_windows,
+            driver_configs=driver_configs,
         )
         if not custom_predictions.empty:
             all_predictions.append(custom_predictions)
@@ -122,7 +129,9 @@ def main() -> None:
             logger.exception("AutoGluon training failed; continuing with baselines: %s", exc)
 
         progress(WorkerStage.CALCULATE_METRICS, 64, "正在统一计算 WAPE、MAE、Bias 与覆盖率")
-        backtest_predictions = pd.concat(all_predictions, ignore_index=True)
+        backtest_predictions = apply_forecast_driver_adjustments(
+            pd.concat(all_predictions, ignore_index=True), driver_configs
+        )
         if backtest_predictions.empty:
             raise ForecastLabError("没有可用预测结果，请检查序列长度和预测周期")
         leaderboard = evaluate_models(backtest_predictions)
@@ -164,6 +173,7 @@ def main() -> None:
                     freq=config.freq,
                     prediction_length=config.prediction_length,
                     model=str(best_model["model"]),
+                    driver_configs=driver_configs,
                 )
             except Exception as exc:
                 logger.exception(
@@ -210,6 +220,14 @@ def main() -> None:
                     model=str(best_baseline["model"]),
                 )
 
+        future_forecast = apply_forecast_driver_adjustments(future_forecast, driver_configs)
+        future_driver_assumptions = build_future_driver_assumptions(
+            normalized_data,
+            driver_configs,
+            freq=config.freq,
+            prediction_length=config.prediction_length,
+        )
+
         progress(WorkerStage.BUILD_EXPORT, 90, "正在落盘结果并生成 Excel 评测报告")
         quality_report = _quality_report_frame(experiment_dir / "data_profile.json")
         metadata = _runtime_metadata(config)
@@ -223,6 +241,10 @@ def main() -> None:
             backtest_predictions, experiment_dir / "results" / "backtest_predictions.parquet"
         )
         write_parquet(future_forecast, experiment_dir / "results" / "future_forecast.parquet")
+        write_parquet(
+            future_driver_assumptions,
+            experiment_dir / "results" / "future_driver_assumptions.parquet",
+        )
         write_parquet(window_metrics, experiment_dir / "results" / "window_metrics.parquet")
         export_path = export_evaluation_workbook(
             output_dir=experiment_dir / "exports",
@@ -233,6 +255,7 @@ def main() -> None:
             series_metrics=series_metrics,
             backtest_predictions=backtest_predictions,
             future_forecast=future_forecast,
+            future_driver_assumptions=future_driver_assumptions,
             quality_report=quality_report,
             config={**asdict(config), **metadata},
         )

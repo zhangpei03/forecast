@@ -1,6 +1,6 @@
 import pandas as pd
 
-from src.services.excel_service import parse_amount, parse_timestamp
+from src.services.excel_service import normalize_finance_dataframe, parse_amount, parse_timestamp
 from src.services.mapping_service import build_item_id
 
 
@@ -38,3 +38,24 @@ def test_build_item_id_joins_dimension_columns() -> None:
     item_id = build_item_id(frame, ["组织", "科目", "产品"])
 
     assert item_id.iloc[0] == "总部 / 人力成本 / 全部"
+
+
+def test_normalize_finance_dataframe_parses_selected_covariates_as_numbers() -> None:
+    raw = pd.DataFrame(
+        {
+            "date": ["2024-01-01", "2024-02-01"],
+            "account": ["收入", "收入"],
+            "amount": ["1,000", "1,100"],
+            "workdays": ["20", "19"],
+        }
+    )
+
+    normalized = normalize_finance_dataframe(
+        raw,
+        timestamp_column="date",
+        target_column="amount",
+        item_columns=["account"],
+        known_covariates=["workdays"],
+    )
+
+    assert normalized["workdays"].tolist() == [20.0, 19.0]

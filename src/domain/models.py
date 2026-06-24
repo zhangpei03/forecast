@@ -10,6 +10,24 @@ from src.domain.enums import ExperimentStatus
 
 
 @dataclass(frozen=True)
+class ForecastDriverConfig:
+    """A typed business assumption or model input used by the forecasting run."""
+
+    name: str
+    config_type: str
+    column: str | None = None
+    availability: str | None = None
+    future_value_strategy: str | None = None
+    growth_rate: float | None = None
+    impact_months: list[int] = field(default_factory=list)
+    impact_rate: float | None = None
+    base_value: float | None = None
+    scenario_growth_rate: float | None = None
+    effect_rate: float | None = None
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
 class ExperimentConfig:
     experiment_id: str
     name: str
@@ -21,6 +39,7 @@ class ExperimentConfig:
     known_covariates: list[str] = field(default_factory=list)
     past_covariates: list[str] = field(default_factory=list)
     static_features: list[str] = field(default_factory=list)
+    driver_configs: list[ForecastDriverConfig | dict[str, Any]] = field(default_factory=list)
     freq: str = "M"
     prediction_length: int = 3
     num_val_windows: int = 3

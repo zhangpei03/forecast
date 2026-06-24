@@ -12,6 +12,15 @@ from src.services.chart_service import (
     build_deviation_bar_figure,
     build_trend_figure,
 )
+from src.services.forecast_driver_service import (
+    AVAILABILITY_KNOWN_FUTURE,
+    CONFIG_TYPE_CALENDAR_FACTOR,
+    CONFIG_TYPE_COVARIATE,
+    CONFIG_TYPE_GROWTH_RATE,
+    CONFIG_TYPE_SCENARIO_COVARIATE,
+    FUTURE_VALUE_MEAN,
+    normalize_driver_configs,
+)
 from src.storage.file_store import get_experiment_dir, read_json
 from src.storage.parquet import read_parquet
 from src.ui.components import page_header
@@ -78,6 +87,11 @@ normalized = read_parquet(experiment_dir / "normalized_data.parquet")
 leaderboard = read_parquet(results_dir / "leaderboard.parquet")
 backtest = read_parquet(results_dir / "backtest_predictions.parquet")
 future = read_parquet(results_dir / "future_forecast.parquet")
+future_driver_assumptions = (
+    read_parquet(results_dir / "future_driver_assumptions.parquet")
+    if (results_dir / "future_driver_assumptions.parquet").exists()
+    else pd.DataFrame()
+)
 series_metrics = read_parquet(results_dir / "series_metrics.parquet")
 window_metrics = read_parquet(results_dir / "window_metrics.parquet")
 conclusion = read_json(results_dir / "conclusion.json").get("conclusion", "暂无结论")
@@ -251,6 +265,64 @@ with tabs[4]:
                 "时间预算": summary.config.get("time_limit_seconds"),
             },
         )
+    driver_configs = normalize_driver_configs(summary.config.get("driver_configs", []))
+    if driver_configs:
+        st.markdown("### 预测驱动配置")
+        rows = []
+        for driver in driver_configs:
+            if driver.config_type == CONFIG_TYPE_COVARIATE:
+                rows.append(
+                    {
+                        "名称": driver.name,
+                        "类型": "协变量",
+                        "字段": driver.column,
+                        "可用性": "已知未来"
+                        if driver.availability == AVAILABILITY_KNOWN_FUTURE
+                        else "历史滞后",
+                        "未来值规则": "历史均值延续"
+                        if driver.future_value_strategy == FUTURE_VALUE_MEAN
+                        else "历史末值延续",
+                    }
+                )
+            elif driver.config_type == CONFIG_TYPE_GROWTH_RATE:
+                rows.append(
+                    {
+                        "名称": driver.name,
+                        "类型": "增长率",
+                        "字段": "—",
+                        "可用性": "全部候选模型",
+                        "未来值规则": f"每预测期 {float(driver.growth_rate or 0) * 100:.2f}%",
+                    }
+                )
+            elif driver.config_type == CONFIG_TYPE_CALENDAR_FACTOR:
+                rows.append(
+                    {
+                        "名称": driver.name,
+                        "类型": "节假日/事件影响",
+                        "字段": "—",
+                        "可用性": "影响月份："
+                        + "、".join(f"{month}月" for month in driver.impact_months),
+                        "未来值规则": f"影响率 {float(driver.impact_rate or 0) * 100:.2f}%",
+                    }
+                )
+            elif driver.config_type == CONFIG_TYPE_SCENARIO_COVARIATE:
+                rows.append(
+                    {
+                        "名称": driver.name,
+                        "类型": "手工情景协变量",
+                        "字段": "无历史字段",
+                        "可用性": "输出未来假设",
+                        "未来值规则": (
+                            f"基准 {float(driver.base_value or 0):,.2f}，"
+                            f"每期 {float(driver.scenario_growth_rate or 0) * 100:.2f}%，"
+                            f"影响系数 {float(driver.effect_rate or 0) * 100:.2f}%"
+                        ),
+                    }
+                )
+        st.dataframe(rows, use_container_width=True, hide_index=True)
+    if not future_driver_assumptions.empty:
+        st.markdown("### 未来手工驱动假设")
+        st.dataframe(future_driver_assumptions, use_container_width=True, hide_index=True)
     st.markdown("### 数据质量摘要")
     profile = read_json(experiment_dir / "data_profile.json")
     st.dataframe(pd.DataFrame(profile.get("issues", [])), use_container_width=True, hide_index=True)

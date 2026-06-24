@@ -107,6 +107,9 @@ def normalize_finance_dataframe(
     normalized = data.copy()
     normalized["timestamp"] = normalized[timestamp_column].map(parse_timestamp)
     normalized["target"] = normalized[target_column].map(parse_amount)
+    for column in dict.fromkeys([*(known_covariates or []), *(past_covariates or [])]):
+        if column in normalized:
+            normalized[column] = normalized[column].map(parse_amount)
     normalized["item_id"] = build_item_id(normalized, item_columns)
 
     selected_columns = [
