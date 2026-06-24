@@ -64,7 +64,7 @@ def generate_autogluon_backtest_predictions(
         predictor.fit(
             train_ts,
             presets=config.preset,
-            hyperparameters=_lightweight_hyperparameters(),
+            hyperparameters=hyperparameters_for_preset(config.preset),
             time_limit=max(120, int(config.time_limit_seconds / max(config.num_val_windows, 1))),
             random_seed=config.random_seed,
             enable_ensemble=True,
@@ -117,7 +117,7 @@ def generate_autogluon_future_forecast(
     predictor.fit(
         train_ts,
         presets=config.preset,
-        hyperparameters=_lightweight_hyperparameters(),
+        hyperparameters=hyperparameters_for_preset(config.preset),
         time_limit=config.time_limit_seconds,
         random_seed=config.random_seed,
         enable_ensemble=True,
@@ -229,6 +229,8 @@ def _format_autogluon_predictions(
 
 
 def _lightweight_hyperparameters() -> dict[str, dict]:
+    """快速验证 / 标准评测档位: 统计 + 树模型, CPU 上即可快速收敛。"""
+
     return {
         "SeasonalNaive": {},
         "RecursiveTabular": {},
@@ -236,6 +238,41 @@ def _lightweight_hyperparameters() -> dict[str, dict]:
         "ETS": {},
         "Theta": {},
     }
+
+
+def _standard_hyperparameters() -> dict[str, dict]:
+    """标准评测档位: 在轻量集基础上补 LightGBM 后端的树模型。"""
+
+    hyperparameters = _lightweight_hyperparameters()
+    hyperparameters["RecursiveTabular"] = {"model_name": "GBM"}
+    hyperparameters["DirectTabular"] = {"model_name": "GBM"}
+    return hyperparameters
+
+
+def _deep_hyperparameters() -> dict[str, dict]:
+    """深度评测档位: 在标准集基础上放开深度学习与预训练时序模型。"""
+
+    hyperparameters = _standard_hyperparameters()
+    hyperparameters["DeepAR"] = {}
+    hyperparameters["TemporalFusionTransformer"] = {}
+    hyperparameters["PatchTST"] = {}
+    hyperparameters["Chronos"] = {"model_path": "bolt_small"}
+    return hyperparameters
+
+
+def hyperparameters_for_preset(preset: str) -> dict[str, dict]:
+    """按训练档位选择 AutoGluon 候选模型集合。
+
+    - ``fast_training``: 轻量统计 + 树模型, 最快给出可预测性结论。
+    - ``medium_quality``: 在轻量集基础上补 LightGBM 后端。
+    - ``high_quality``: 放开 DeepAR / TFT / PatchTST / Chronos 深度模型。
+    """
+
+    if preset == "high_quality":
+        return _deep_hyperparameters()
+    if preset == "fast_training":
+        return _lightweight_hyperparameters()
+    return _standard_hyperparameters()
 
 
 def _align_known_covariates_to_future(

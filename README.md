@@ -50,9 +50,11 @@ make clean-runtime # 删除 runtime 目录
 
 ## 训练模式
 
-- 快速验证：`fast_training`，默认 600 秒
-- 标准评测：`medium_quality`，默认 1800 秒
-- 深度评测：`high_quality`，默认 3600 秒
+- 快速验证：`fast_training`，默认 600 秒，AutoGluon 仅启用轻量统计与树模型（SeasonalNaive、ETS、Theta、RecursiveTabular、DirectTabular）
+- 标准评测：`medium_quality`，默认 1800 秒，在轻量集基础上将树模型切换为 LightGBM（GBM）后端
+- 深度评测：`high_quality`，默认 3600 秒，额外放开深度学习与预训练时序模型 DeepAR、TFT、PatchTST、Chronos
+
+各档位的 AutoGluon 候选模型集合由 `src/services/autogluon_service.py` 的 `hyperparameters_for_preset` 决定。深度评测会下载并训练深度模型，CPU 环境耗时显著更长，建议预留足够时间预算。
 
 Worker 独立子进程运行，页面通过 SQLite、`progress.json` 和 Parquet 结果文件轮询。
 

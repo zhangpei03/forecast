@@ -4,7 +4,10 @@ from src.services.autogluon_service import (
     _align_known_covariates_to_future,
     _format_autogluon_predictions,
     _lightweight_hyperparameters,
+    hyperparameters_for_preset,
 )
+
+_DEEP_MODELS = {"DeepAR", "TemporalFusionTransformer", "PatchTST", "Chronos"}
 
 
 def test_lightweight_hyperparameters_excludes_heavy_deep_models() -> None:
@@ -19,6 +22,29 @@ def test_lightweight_hyperparameters_excludes_heavy_deep_models() -> None:
     }
     assert "Chronos2" not in hyperparameters
     assert "TemporalFusionTransformer" not in hyperparameters
+
+
+def test_fast_preset_uses_lightweight_models_only() -> None:
+    hyperparameters = hyperparameters_for_preset("fast_training")
+
+    assert hyperparameters == _lightweight_hyperparameters()
+    assert _DEEP_MODELS.isdisjoint(hyperparameters)
+
+
+def test_medium_preset_adds_lightgbm_backend_without_deep_models() -> None:
+    hyperparameters = hyperparameters_for_preset("medium_quality")
+
+    assert hyperparameters["RecursiveTabular"] == {"model_name": "GBM"}
+    assert hyperparameters["DirectTabular"] == {"model_name": "GBM"}
+    assert _DEEP_MODELS.isdisjoint(hyperparameters)
+
+
+def test_high_preset_enables_deep_learning_models() -> None:
+    hyperparameters = hyperparameters_for_preset("high_quality")
+
+    assert _DEEP_MODELS.issubset(hyperparameters)
+    assert hyperparameters["Chronos"] == {"model_path": "bolt_small"}
+    assert {"SeasonalNaive", "ETS", "Theta"}.issubset(hyperparameters)
 
 
 def test_align_known_covariates_to_future_uses_series_horizon_order() -> None:
