@@ -5,6 +5,11 @@ headless = true
 [browser]
 gatherUsageStats = false
 
+[client]
+# 隐藏开发者工具栏与相关快捷键(如按 C 弹出 Clear caches 对话框),
+# 部署给终端用户时用 minimal, 避免误触清缓存/重跑等开发者动作。
+toolbarMode = "minimal"
+
 [theme]
 base = "light"
 primaryColor = "#4F46E5"

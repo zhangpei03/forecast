@@ -36,6 +36,7 @@ class ExperimentConfig:
     timestamp_column: str
     target_column: str
     item_columns: list[str]
+    owner_ldap: str = ""
     known_covariates: list[str] = field(default_factory=list)
     past_covariates: list[str] = field(default_factory=list)
     static_features: list[str] = field(default_factory=list)
@@ -55,6 +56,7 @@ class ExperimentConfig:
 @dataclass(frozen=True)
 class ExperimentSummary:
     id: str
+    owner_ldap: str
     name: str
     status: ExperimentStatus
     source_file: str | None

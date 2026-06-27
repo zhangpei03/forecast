@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import streamlit as st
 
+from src.core.auth import require_user
 from src.core.config import get_settings
 from src.repositories.experiment_repository import ExperimentRepository
 from src.ui.components import page_header, render_experiment_cards, status_badge
 
 settings = get_settings()
-repository = ExperimentRepository(settings.database_path)
+repository = ExperimentRepository(settings.database_url)
+current_user = require_user()
 
 page_header(
     "财务预测实验",
@@ -19,7 +21,7 @@ with right:
     if st.button("新建实验", type="primary", use_container_width=True):
         st.switch_page("pages/create_experiment.py")
 
-experiments = repository.list_experiments()
+experiments = repository.list_experiments(current_user)
 
 if not experiments:
     st.markdown(

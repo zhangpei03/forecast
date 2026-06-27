@@ -7,3 +7,8 @@ __pycache__/
 *.py[cod]
 runtime/
 *.log
+
+# 非本项目产物(其它任务临时文件)
+.fpa_work/
+fetch_precip.py
+precip_*.csv

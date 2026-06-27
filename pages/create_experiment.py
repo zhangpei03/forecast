@@ -6,10 +6,11 @@ from datetime import datetime
 
 import streamlit as st
 
+from src.core.auth import require_user
 from src.core.config import get_settings
 from src.core.constants import DEFAULT_PREDICTION_LENGTH, TRAINING_PRESETS
 from src.domain.models import ExperimentConfig
-from src.jobs.job_runner import start_training_job
+from src.jobs.job_runner import TooManyActiveJobsError, start_training_job
 from src.repositories.experiment_repository import ExperimentRepository
 from src.services.data_quality_service import (
     estimate_supported_backtest_windows,
@@ -40,7 +41,8 @@ from src.storage.parquet import write_parquet
 from src.ui.components import page_header, profile_to_json, render_quality_profile
 
 settings = get_settings()
-repository = ExperimentRepository(settings.database_path)
+repository = ExperimentRepository(settings.database_url)
+current_user = require_user()
 
 page_header(
     "新建预测实验",
@@ -77,7 +79,7 @@ if step == "1 上传数据":
                 st.session_state.get("draft_experiment_id") or f"exp_{uuid.uuid4().hex[:12]}"
             )
             st.session_state.draft_experiment_id = experiment_id
-            upload_dir = settings.upload_dir / experiment_id
+            upload_dir = settings.upload_dir(current_user) / experiment_id
             upload_dir.mkdir(parents=True, exist_ok=True)
             uploaded_path = upload_dir / "source.xlsx"
             uploaded_path.write_bytes(uploaded.getbuffer())
@@ -472,11 +474,12 @@ if step == "4 确认运行":
         st.error("仍存在阻断问题，请返回字段与质量步骤处理后再运行。")
     if st.button("开始评测", type="primary", disabled=not can_run):
         experiment_id = st.session_state.draft_experiment_id
-        experiment_dir = get_experiment_dir(settings, experiment_id)
+        experiment_dir = get_experiment_dir(settings, current_user, experiment_id)
         mapping = st.session_state.mapping
         runtime = st.session_state.experiment_runtime_config
         config = ExperimentConfig(
             experiment_id=experiment_id,
+            owner_ldap=current_user,
             name=runtime["experiment_name"],
             source_file=st.session_state.uploaded_path,
             sheet_name=st.session_state.sheet_name,
@@ -506,6 +509,15 @@ if step == "4 确认运行":
             item_count=profile.item_count,
             row_count=profile.row_count,
         )
-        start_training_job(settings=settings, repository=repository, experiment_id=experiment_id)
+        try:
+            start_training_job(
+                settings=settings,
+                repository=repository,
+                experiment_id=experiment_id,
+                owner_ldap=current_user,
+            )
+        except TooManyActiveJobsError as exc:
+            st.error(str(exc))
+            st.stop()
         st.query_params["experiment_id"] = experiment_id
         st.switch_page("pages/run_status.py")

@@ -1,0 +1,4 @@
+interface:
+  display_name: "滴滴内网部署"
+  short_description: "把本地Web应用改造并部署到滴滴内网(SSO+数据隔离)"
+  default_prompt: "Use $didi-intranet-deploy to deploy this local app to the DiDi intranet with SSO login and per-user data isolation."

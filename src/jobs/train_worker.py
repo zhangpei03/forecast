@@ -1,5 +1,22 @@
 from __future__ import annotations
 
+# 必须在 import pandas / autogluon / pyarrow / xgboost 等任何重库之前完成,
+# 否则 macOS arm64 上 libomp + Arrow 多线程会触发 condition_variable 死锁。
+import os as _os
+
+for _k, _v in (
+    ("OMP_NUM_THREADS", "1"),
+    ("OPENBLAS_NUM_THREADS", "1"),
+    ("MKL_NUM_THREADS", "1"),
+    ("VECLIB_MAXIMUM_THREADS", "1"),
+    ("NUMEXPR_NUM_THREADS", "1"),
+    # 防止 macOS fork 时 Objective-C runtime 与多线程 BLAS 冲突
+    ("OBJC_DISABLE_INITIALIZE_FORK_SAFETY", "YES"),
+    # AutoGluon / Ray 的并行限制
+    ("TOKENIZERS_PARALLELISM", "false"),
+):
+    _os.environ.setdefault(_k, _v)
+
 import argparse
 import os
 import platform
@@ -51,9 +68,12 @@ from src.storage.parquet import read_parquet, write_parquet
 
 def main() -> None:
     args = _parse_args()
-    settings = AppSettings(runtime_dir=Path(args.runtime_dir))
-    repository = ExperimentRepository(Path(args.database_path))
-    experiment_dir = get_experiment_dir(settings, args.experiment_id)
+    settings = AppSettings(
+        runtime_dir=Path(args.runtime_dir),
+        database_url=args.database_url,
+    )
+    repository = ExperimentRepository(args.database_url)
+    experiment_dir = get_experiment_dir(settings, args.owner_ldap, args.experiment_id)
     logger = configure_worker_logger(experiment_dir / "run.log")
 
     def progress(stage: WorkerStage, percent: int, message: str, status: str = "RUNNING") -> None:
@@ -80,9 +100,11 @@ def main() -> None:
         logger.info("%s %s", stage.value, message)
 
     try:
-        repository.update_status(args.experiment_id, ExperimentStatus.RUNNING)
+        repository.update_status(
+            args.experiment_id, ExperimentStatus.RUNNING, owner_ldap=args.owner_ldap
+        )
         progress(WorkerStage.LOAD_DATA, 5, "正在读取标准化财务数据")
-        summary = repository.get_experiment(args.experiment_id)
+        summary = repository.get_experiment(args.experiment_id, args.owner_ldap)
         if summary is None:
             raise ForecastLabError("实验不存在或已被删除")
         config = ExperimentConfig(**summary.config)
@@ -272,6 +294,7 @@ def main() -> None:
             best_wape=float(best_model["wape"]) if pd.notna(best_model["wape"]) else None,
             baseline_wape=float(best_baseline["wape"]) if pd.notna(best_baseline["wape"]) else None,
             improvement_rate=improvement,
+            owner_ldap=args.owner_ldap,
         )
         progress(WorkerStage.COMPLETE, 100, "评测完成，可查看结果并导出报告", status="SUCCEEDED")
         repository.update_run(
@@ -302,7 +325,8 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--experiment-id", required=True)
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--database-path", required=True)
+    parser.add_argument("--owner-ldap", required=True)
+    parser.add_argument("--database-url", required=True)
     parser.add_argument("--runtime-dir", required=True)
     return parser.parse_args()
 
@@ -316,7 +340,9 @@ def _fail(
     error_message: str,
 ) -> None:
     logger.exception("%s %s", error_code, error_message)
-    repository.update_status(args.experiment_id, ExperimentStatus.FAILED)
+    repository.update_status(
+        args.experiment_id, ExperimentStatus.FAILED, owner_ldap=args.owner_ldap
+    )
     repository.update_run(
         args.run_id,
         status="FAILED",

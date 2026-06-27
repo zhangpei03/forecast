@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
+from src.core.auth import require_user
 from src.core.config import get_settings
 from src.repositories.experiment_repository import ExperimentRepository
 from src.services.chart_service import (
@@ -26,7 +27,8 @@ from src.storage.parquet import read_parquet
 from src.ui.components import page_header
 
 settings = get_settings()
-repository = ExperimentRepository(settings.database_path)
+repository = ExperimentRepository(settings.database_url)
+current_user = require_user()
 
 
 def _percent(value) -> str:
@@ -62,7 +64,9 @@ def _kv_card(title: str, values: dict) -> None:
 
 experiment_id = st.query_params.get("experiment_id")
 if not experiment_id:
-    succeeded = [item for item in repository.list_experiments() if item.status.value == "SUCCEEDED"]
+    succeeded = [
+        item for item in repository.list_experiments(current_user) if item.status.value == "SUCCEEDED"
+    ]
     experiment_id = succeeded[0].id if succeeded else None
 
 if not experiment_id:
@@ -70,7 +74,7 @@ if not experiment_id:
     st.info("完成一次评测后将在这里展示趋势、偏差和模型榜单。")
     st.stop()
 
-summary = repository.get_experiment(experiment_id)
+summary = repository.get_experiment(experiment_id, current_user)
 if summary is None:
     st.error("实验不存在。")
     st.stop()
@@ -81,7 +85,7 @@ if summary.status.value != "SUCCEEDED":
         st.switch_page("pages/run_status.py")
     st.stop()
 
-experiment_dir = get_experiment_dir(settings, experiment_id)
+experiment_dir = get_experiment_dir(settings, current_user, experiment_id)
 results_dir = experiment_dir / "results"
 normalized = read_parquet(experiment_dir / "normalized_data.parquet")
 leaderboard = read_parquet(results_dir / "leaderboard.parquet")

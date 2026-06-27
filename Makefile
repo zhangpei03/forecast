@@ -1,10 +1,24 @@
-.PHONY: install run test lint format clean-runtime init-db demo-data didi-example-data
+.PHONY: install run test lint format clean-runtime init-db demo-data didi-example-data \
+	sidecar-dev docker-build docker-push
+
+IMAGE ?= hub.xiaojukeji.com/parkerzhang/forecast:v1
 
 install:
 	uv sync
 
 run:
 	uv run streamlit run app.py
+
+# 本地起 SSO sidecar(可配合 SSO_DEV_FAKE_USER 联调鉴权链路)
+sidecar-dev:
+	uv run uvicorn deploy.sso_sidecar.main:app --reload --port 9000
+
+# 构建内网部署镜像(Apple Silicon 需指定 amd64)
+docker-build:
+	docker build --platform linux/amd64 -t $(IMAGE) .
+
+docker-push:
+	docker push $(IMAGE)
 
 test:
 	uv run pytest -q

@@ -1,0 +1,77 @@
+# 本地一键起整条内网部署链路 (仅用于集成验证, 不是生产编排):
+#   浏览器 -> app(nginx :8080) --auth_request--> sidecar(容器内) --check--> mock-sso
+#   未登录 -> nginx 302 -> mock-sso 登录页(localhost:18080) -> 选身份 -> 回跳 callback
+#   数据落 MySQL(forecast_lab) + 命名卷(用户隔离子目录)
+#
+# 用法:
+#   docker compose up --build
+#   浏览器打开 http://localhost:8080  -> 自动跳到 mock 登录页, 选 alice / bob 验证隔离
+#
+# 注意 URL 双地址:
+#   - 浏览器可达(nginx 302 / sidecar 写 cookie 后回跳): http://localhost:18080
+#   - 容器网络内(sidecar 调 check_code/check_ticket):   http://mock-sso:8080
+
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: rootpw
+      MYSQL_DATABASE: forecast_lab
+      MYSQL_USER: forecast
+      MYSQL_PASSWORD: forecastpw
+    ports:
+      - "13306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-prootpw"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+  mock-sso:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["uvicorn", "deploy.dev.mock_sso:app", "--host", "0.0.0.0", "--port", "8080"]
+    entrypoint: []                     # 覆盖主镜像 entrypoint, 直接跑 mock
+    ports:
+      - "18080:8080"                   # 浏览器访问登录页用
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      mysql:
+        condition: service_healthy
+      mock-sso:
+        condition: service_started
+    ports:
+      - "8080:80"
+    environment:
+      # ── 数据库 ──
+      DATABASE_URL: "mysql+pymysql://forecast:forecastpw@mysql:3306/forecast_lab?charset=utf8mb4"
+      MAX_CONCURRENT_TRAINING: "3"
+      FORECAST_LAB_RUNTIME_DIR: "/data"
+
+      # ── nginx 登录跳转(浏览器可达地址 + http 回跳) ──
+      SSO_APP_ID: "local-test"
+      SSO_LOGIN_BASE: "http://localhost:18080/auth/sso/login"
+      CALLBACK_SCHEME: "http"
+
+      # ── sidecar 调用 mock-sso(容器网络地址) ──
+      SSO_CHECK_CODE_URL: "http://mock-sso:8080/auth/sso/api/check_code"
+      SSO_CHECK_TICKET_URL: "http://mock-sso:8080/auth/sso/api/check_ticket"
+      SSO_LOGOUT_URL: "http://localhost:18080/auth/ldap/logout"
+      SSO_APP_KEY: "local-test-key"
+      # Fernet 密钥(本地固定一个即可); cookie 走 http 故关闭 Secure
+      SSO_COOKIE_SECRET: "hzs8V-ToCbfMk3ubYHrMHWDr3eJxv2Rka9K71uS2noE="
+      SSO_COOKIE_SECURE: "0"
+      # 注意: 不要设 SSO_DEV_FAKE_USER, 否则所有人变同一身份, 无法验证隔离
+    volumes:
+      - app_data:/data
+
+volumes:
+  mysql_data:
+  app_data:

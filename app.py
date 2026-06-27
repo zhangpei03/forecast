@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+# 在读取 settings / 初始化引擎之前加载 .env(DATABASE_URL / MAX_CONCURRENT_TRAINING 等)
+from dotenv import load_dotenv as _load_dotenv
+
+_load_dotenv(override=False)
+
 import streamlit as st
 
+from src.core.auth import current_user
 from src.core.config import get_settings
 from src.repositories.experiment_repository import ExperimentRepository
 from src.storage.file_store import ensure_runtime_dirs
@@ -9,7 +15,7 @@ from src.ui.theme import apply_theme
 
 settings = get_settings()
 ensure_runtime_dirs(settings)
-ExperimentRepository(settings.database_path)
+ExperimentRepository(settings.database_url)
 
 st.set_page_config(
     page_title="Forecast Lab",
@@ -18,6 +24,9 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 apply_theme()
+
+with st.sidebar:
+    st.caption(f"当前用户：{current_user()}")
 
 experiments_page = st.Page(
     "pages/experiments.py",

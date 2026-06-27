@@ -10,12 +10,13 @@ from src.core.config import AppSettings
 
 def ensure_runtime_dirs(settings: AppSettings) -> None:
     settings.runtime_dir.mkdir(parents=True, exist_ok=True)
-    settings.upload_dir.mkdir(parents=True, exist_ok=True)
-    settings.experiments_dir.mkdir(parents=True, exist_ok=True)
+    # 仅创建顶层根目录; 用户子目录由首次访问时按需创建, 避免新用户登录时全量遍历。
+    settings.upload_root.mkdir(parents=True, exist_ok=True)
+    settings.experiments_root.mkdir(parents=True, exist_ok=True)
 
 
-def get_experiment_dir(settings: AppSettings, experiment_id: str) -> Path:
-    path = settings.experiments_dir / experiment_id
+def get_experiment_dir(settings: AppSettings, owner_ldap: str, experiment_id: str) -> Path:
+    path = settings.experiments_dir(owner_ldap) / experiment_id
     (path / "results").mkdir(parents=True, exist_ok=True)
     (path / "models").mkdir(parents=True, exist_ok=True)
     (path / "exports").mkdir(parents=True, exist_ok=True)

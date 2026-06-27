@@ -5,19 +5,21 @@ from datetime import datetime
 
 import streamlit as st
 
+from src.core.auth import require_user
 from src.core.config import get_settings
 from src.domain.enums import ExperimentStatus
-from src.jobs.job_runner import start_training_job
+from src.jobs.job_runner import TooManyActiveJobsError, start_training_job
 from src.repositories.experiment_repository import ExperimentRepository
 from src.storage.file_store import get_experiment_dir, read_json
 from src.ui.components import page_header, status_badge
 
 settings = get_settings()
-repository = ExperimentRepository(settings.database_path)
+repository = ExperimentRepository(settings.database_url)
+current_user = require_user()
 
 experiment_id = st.query_params.get("experiment_id")
 if not experiment_id:
-    latest = repository.list_experiments()
+    latest = repository.list_experiments(current_user)
     experiment_id = latest[0].id if latest else None
 
 if not experiment_id:
@@ -25,12 +27,12 @@ if not experiment_id:
     st.info("请先创建实验。")
     st.stop()
 
-summary = repository.get_experiment(experiment_id)
+summary = repository.get_experiment(experiment_id, current_user)
 if summary is None:
     st.error("实验不存在。")
     st.stop()
 
-progress_path = get_experiment_dir(settings, experiment_id) / "progress.json"
+progress_path = get_experiment_dir(settings, current_user, experiment_id) / "progress.json"
 progress = read_json(progress_path)
 
 page_header(
@@ -69,12 +71,17 @@ elif progress.get("status") == ExperimentStatus.FAILED.value:
     st.error(progress.get("message", "任务失败"))
     st.caption(f"技术日志路径：{progress.get('log_path', '—')}")
     if st.button("重新运行评测", type="primary"):
-        start_training_job(
-            settings=settings,
-            repository=repository,
-            experiment_id=experiment_id,
-        )
-        st.rerun()
+        try:
+            start_training_job(
+                settings=settings,
+                repository=repository,
+                experiment_id=experiment_id,
+                owner_ldap=current_user,
+            )
+        except TooManyActiveJobsError as exc:
+            st.error(str(exc))
+        else:
+            st.rerun()
 else:
     st.caption(f"最后更新：{progress.get('updated_at') or datetime.now():}")
     time.sleep(2)
