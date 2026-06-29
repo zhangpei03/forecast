@@ -20,7 +20,7 @@
  done
  
  # 拷贝目录(排除 __pycache__ 和 .pyc)
- for d in src pages deploy scripts runtime sample_data .streamlit; do
+ for d in src pages deploy scripts runtime sample_data .streamlit config; do
    if [ -d "$d" ]; then
      mkdir -p "output/$d"
      find "$d" -type f ! -name '*.pyc' ! -path '*__pycache__*' -exec cp --parents {} output/ \;
@@ -35,16 +35,25 @@
    fi
  done
  
- # Copy environment-specific .env
- if [ -d "config" ] && [ -f "config/${APP_ENV}/.env" ]; then
-     cp "config/${APP_ENV}/.env" output/.env
-     echo "Using config/${APP_ENV}/.env"
- else
-     echo "No config/${APP_ENV}/.env, using .env if present"
- fi
+  # ── 替换 Dockerfile FROM 行为内网基础镜像 ──
+  if [ -f "config/${APP_ENV}/Dockerfile" ]; then
+      FROM_LINE=$(head -1 "config/${APP_ENV}/Dockerfile")
+      sed -i "1s|^FROM .*|${FROM_LINE}|" output/Dockerfile
+      echo "Using base image: ${FROM_LINE}"
+  else
+      echo "No config/${APP_ENV}/Dockerfile, using default Dockerfile"
+  fi
  
- echo "=== build done ==="
- echo "output/ top-level:"
- ls output/
- echo "output/deploy/:"
- ls output/deploy/
+  # Copy environment-specific .env
+  if [ -d "config" ] && [ -f "config/${APP_ENV}/.env" ]; then
+      cp "config/${APP_ENV}/.env" output/.env
+      echo "Using config/${APP_ENV}/.env"
+  else
+      echo "No config/${APP_ENV}/.env, using .env if present"
+  fi
+ 
+  echo "=== build done ==="
+  echo "output/ top-level:"
+  ls output/
+  echo "output/Dockerfile first line:"
+  head -1 output/Dockerfile
