@@ -44,6 +44,14 @@ def current_user() -> str:
     return _normalize(os.environ.get(DEV_USER_ENV)) or DEFAULT_DEV_USER
 
 
+def is_sso_authenticated() -> bool:
+    """判断当前用户是否通过 SSO 登录(即请求头里有 X-SSO-User)。
+
+    本地开发环境(走环境变量)返回 False, 让前端区分展示。
+    """
+    return bool(_from_request_header())
+
+
 def require_user() -> str:
     """业务页面统一入口: 拿不到用户时显式中断页面渲染。
 

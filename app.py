@@ -7,7 +7,7 @@ _load_dotenv(override=False)
 
 import streamlit as st
 
-from src.core.auth import current_user
+from src.core.auth import current_user, is_sso_authenticated
 from src.core.config import get_settings
 from src.repositories.experiment_repository import ExperimentRepository
 from src.storage.file_store import ensure_runtime_dirs
@@ -26,7 +26,32 @@ st.set_page_config(
 apply_theme()
 
 with st.sidebar:
-    st.caption(f"当前用户：{current_user()}")
+    _user = current_user()
+    if is_sso_authenticated():
+        st.markdown(
+            f"""
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+              <span style="display:inline-flex;align-items:center;justify-content:center;
+                width:28px;height:28px;border-radius:50%;background:#4F46E5;
+                color:#fff;font-weight:700;font-size:13px;">{_user[0].upper()}</span>
+              <div>
+                <div style="font-size:14px;font-weight:600;color:#101828;">{_user}</div>
+                <div style="font-size:11px;color:#667085;">滴滴内网 SSO 已登录</div>
+              </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<a href="/sso/logout" style="font-size:12px;color:#4F46E5;text-decoration:none;">退出登录</a>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.caption(f"当前用户：{_user}")
+        st.markdown(
+            '<a href="/sso/login" style="font-size:12px;color:#4F46E5;text-decoration:none;">SSO 登录</a>',
+            unsafe_allow_html=True,
+        )
 
 experiments_page = st.Page(
     "pages/experiments.py",
