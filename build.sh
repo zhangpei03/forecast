@@ -35,14 +35,19 @@
    fi
  done
  
-  # ── 替换 Dockerfile FROM 行为内网基础镜像 ──
-  if [ -f "config/${APP_ENV}/Dockerfile" ]; then
-      FROM_LINE=$(head -1 "config/${APP_ENV}/Dockerfile")
-      sed -i "1s|^FROM .*|${FROM_LINE}|" output/Dockerfile
-      echo "Using base image: ${FROM_LINE}"
-  else
-      echo "No config/${APP_ENV}/Dockerfile, using default Dockerfile"
-  fi
+   # ── 替换 Dockerfile 基础镜像为内网镜像 ──
+   if [ -f "config/${APP_ENV}/Dockerfile" ]; then
+       INTERNAL_IMAGE=$(head -1 "config/${APP_ENV}/Dockerfile" | sed 's/^FROM //')
+       echo "Using internal base image: ${INTERNAL_IMAGE}"
+       # 替换 ARG BASE_IMAGE 和所有 FROM 行
+       sed -i "s|^ARG BASE_IMAGE=.*|ARG BASE_IMAGE=${INTERNAL_IMAGE}|g" output/Dockerfile
+       sed -i "s|^FROM \${BASE_IMAGE} AS builder|FROM ${INTERNAL_IMAGE} AS builder|g" output/Dockerfile
+       sed -i "s|^FROM \${BASE_IMAGE}|FROM ${INTERNAL_IMAGE}|g" output/Dockerfile
+       echo "Dockerfile after replacement:"
+       grep -n 'ARG BASE_IMAGE\|^FROM' output/Dockerfile
+   else
+       echo "No config/${APP_ENV}/Dockerfile, using default Dockerfile"
+   fi
  
   # Copy environment-specific .env
   if [ -d "config" ] && [ -f "config/${APP_ENV}/.env" ]; then
