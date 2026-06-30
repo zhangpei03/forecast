@@ -9,10 +9,10 @@
 # 基础镜像可通过 build-arg 覆盖:
 #   生产内网: --build-arg BASE_IMAGE=hub.xiaojukeji.com/base/python:3.12-slim
 #   本地验证: 默认用本地已有的 python:3.12-slim-bookworm, 避免公网拉取超时
- ARG BASE_IMAGE=python:3.12-slim-bookworm
- 
- # ── Stage 1: builder ──
- FROM ${BASE_IMAGE} AS builder
+ARG BASE_IMAGE=python:3.12-slim-bookworm
+
+# ── Stage 1: builder ──
+FROM ${BASE_IMAGE} AS builder
  
  ENV UV_LINK_MODE=copy \
      UV_PYTHON_DOWNLOADS=never \

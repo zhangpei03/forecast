@@ -39,12 +39,12 @@
    if [ -f "config/${APP_ENV}/Dockerfile" ]; then
        INTERNAL_IMAGE=$(head -1 "config/${APP_ENV}/Dockerfile" | sed -E 's/^[[:space:]]*FROM[[:space:]]+//; s/[[:space:]]+$//')
        echo "Using internal base image: ${INTERNAL_IMAGE}"
-       # 替换 ARG BASE_IMAGE 和所有 FROM 行
-       sed -i "s|^ARG BASE_IMAGE=.*|ARG BASE_IMAGE=${INTERNAL_IMAGE}|g" output/Dockerfile
-       sed -i "s|^FROM \${BASE_IMAGE} AS builder|FROM ${INTERNAL_IMAGE} AS builder|g" output/Dockerfile
-       sed -i "s|^FROM \${BASE_IMAGE}|FROM ${INTERNAL_IMAGE}|g" output/Dockerfile
+       # 替换 ARG BASE_IMAGE 和所有 FROM 行 (容忍行首空白, 防止 ^锚点失配; 用 BRE 兼容 GNU/BSD sed)
+       sed -i "s|^[[:space:]]*ARG BASE_IMAGE=.*|ARG BASE_IMAGE=${INTERNAL_IMAGE}|g" output/Dockerfile
+       sed -i "s|^[[:space:]]*FROM \${BASE_IMAGE} AS builder.*|FROM ${INTERNAL_IMAGE} AS builder|g" output/Dockerfile
+       sed -i "s|^[[:space:]]*FROM \${BASE_IMAGE}[[:space:]]*\$|FROM ${INTERNAL_IMAGE}|g" output/Dockerfile
        echo "Dockerfile after replacement:"
-       grep -n 'ARG BASE_IMAGE\|^FROM' output/Dockerfile
+       grep -nE 'ARG BASE_IMAGE|^[[:space:]]*FROM' output/Dockerfile
    else
        echo "No config/${APP_ENV}/Dockerfile, using default Dockerfile"
    fi
