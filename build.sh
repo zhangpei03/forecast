@@ -37,7 +37,7 @@
  
    # ── 替换 Dockerfile 基础镜像为内网镜像 ──
    if [ -f "config/${APP_ENV}/Dockerfile" ]; then
-       INTERNAL_IMAGE=$(head -1 "config/${APP_ENV}/Dockerfile" | sed 's/^FROM //')
+       INTERNAL_IMAGE=$(head -1 "config/${APP_ENV}/Dockerfile" | sed -E 's/^[[:space:]]*FROM[[:space:]]+//; s/[[:space:]]+$//')
        echo "Using internal base image: ${INTERNAL_IMAGE}"
        # 替换 ARG BASE_IMAGE 和所有 FROM 行
        sed -i "s|^ARG BASE_IMAGE=.*|ARG BASE_IMAGE=${INTERNAL_IMAGE}|g" output/Dockerfile
