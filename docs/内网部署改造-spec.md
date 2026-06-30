@@ -290,7 +290,7 @@ def start_training_job(*, settings, repository, experiment_id, owner_ldap: str) 
 
 ```dockerfile
 # Stage 1: builder
-FROM hub.xiaojukeji.com/base/python:3.12-slim AS builder
+FROM hub.xiaojukeji.com/base/python:3.12-slim-bookworm AS builder
 ENV UV_INDEX_URL=https://pypi.intra.xiaojukeji.com/simple
 ENV UV_LINK_MODE=copy
 RUN pip install --no-cache-dir uv==0.5.*
@@ -299,7 +299,7 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 
 # Stage 2: runtime
-FROM hub.xiaojukeji.com/base/python:3.12-slim
+FROM hub.xiaojukeji.com/base/python:3.12-slim-bookworm
 RUN apt-get update && apt-get install -y --no-install-recommends \
     nginx supervisor && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/.venv /app/.venv
