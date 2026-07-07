@@ -18,6 +18,7 @@ class ForecastDriverConfig:
     column: str | None = None
     availability: str | None = None
     future_value_strategy: str | None = None
+    future_value_coeff: float | None = None
     growth_rate: float | None = None
     impact_months: list[int] = field(default_factory=list)
     impact_rate: float | None = None

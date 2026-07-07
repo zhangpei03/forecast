@@ -66,6 +66,10 @@ if "data_profile" not in st.session_state:
     st.session_state.data_profile = None
 if "driver_configs" not in st.session_state:
     st.session_state.driver_configs = []
+if "editing_driver_index" not in st.session_state:
+    st.session_state.editing_driver_index = None
+if "driver_configs_auto_initialized" not in st.session_state:
+    st.session_state.driver_configs_auto_initialized = False
 
 if step == "1 上传数据":
     with st.container(border=True):
@@ -74,6 +78,7 @@ if step == "1 上传数据":
         if uploaded:
             if st.session_state.get("uploaded_source_name") != uploaded.name:
                 st.session_state.driver_configs = []
+                st.session_state.driver_configs_auto_initialized = False
                 st.session_state.uploaded_source_name = uploaded.name
             experiment_id = (
                 st.session_state.get("draft_experiment_id") or f"exp_{uuid.uuid4().hex[:12]}"
@@ -171,6 +176,27 @@ if step == "3 预测配置":
         st.warning("请先完成字段映射和数据质量检查。")
         st.stop()
     profile = st.session_state.data_profile
+
+    # ── 自动初始化：将步骤2选择的协变量候选字段默认带入 driver_configs ──
+    if not st.session_state.driver_configs_auto_initialized:
+        covariate_candidates = st.session_state.mapping.get("covariate_candidates", [])
+        existing_columns = {
+            d.get("column") for d in st.session_state.driver_configs if d.get("column")
+        }
+        for col in covariate_candidates:
+            if col not in existing_columns:
+                st.session_state.driver_configs.append(
+                    {
+                        "name": col,
+                        "config_type": CONFIG_TYPE_COVARIATE,
+                        "column": col,
+                        "availability": AVAILABILITY_KNOWN_FUTURE,
+                        "future_value_strategy": FUTURE_VALUE_LAST,
+                        "future_value_coeff": 0.0,
+                    }
+                )
+        st.session_state.driver_configs_auto_initialized = True
+
     default_length = DEFAULT_PREDICTION_LENGTH[profile.frequency]
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -204,8 +230,233 @@ if step == "3 预测配置":
         )
         st.caption(preset_config["description"])
 
+    # ── 已配置列表：展示 + 编辑/删除 ──
     st.markdown("#### 预测驱动配置")
-    st.caption("协变量会进入支持该类型的模型；增长率按每预测期复利调整所有候选模型的预测区间。")
+    st.caption("步骤2选择的协变量已自动带入；可编辑或删除，也可添加其他类型配置。")
+
+    if st.session_state.driver_configs:
+        st.markdown("##### 当前配置")
+        for idx, driver in enumerate(st.session_state.driver_configs):
+            config_type_label = {
+                CONFIG_TYPE_COVARIATE: "协变量",
+                CONFIG_TYPE_GROWTH_RATE: "增长率",
+                CONFIG_TYPE_CALENDAR_FACTOR: "节假日/事件影响",
+                CONFIG_TYPE_SCENARIO_COVARIATE: "手工情景协变量",
+            }.get(driver["config_type"], driver["config_type"])
+            with st.container(border=True):
+                row_cols = st.columns([0.38, 0.15, 0.25, 0.11, 0.11])
+                with row_cols[0]:
+                    if driver["config_type"] == CONFIG_TYPE_COVARIATE:
+                        avail_label = "已知未来" if driver.get("availability") == AVAILABILITY_KNOWN_FUTURE else "历史滞后"
+                        strategy_label = "历史均值" if driver.get("future_value_strategy") == FUTURE_VALUE_MEAN else "历史末值"
+                        coeff = driver.get("future_value_coeff") or 0
+                        coeff_str = f" × {1 + coeff:.0%}" if coeff else ""
+                        st.markdown(f"**{driver['name']}**  ·  `{driver['column']}`  ·  {avail_label}  ·  {strategy_label}{coeff_str}")
+                    elif driver["config_type"] == CONFIG_TYPE_GROWTH_RATE:
+                        st.markdown(f"**{driver['name']}**  ·  每期 {float(driver['growth_rate']) * 100:.2f}%")
+                    elif driver["config_type"] == CONFIG_TYPE_CALENDAR_FACTOR:
+                        months_str = "、".join(f"{m}月" for m in driver.get("impact_months", []))
+                        st.markdown(f"**{driver['name']}**  ·  {months_str}  ·  影响率 {float(driver.get('impact_rate') or 0) * 100:.2f}%")
+                    else:
+                        st.markdown(
+                            f"**{driver['name']}**  ·  基准 {float(driver.get('base_value') or 0):,.2f}"
+                            f"  ·  每期 {float(driver.get('scenario_growth_rate') or 0) * 100:.2f}%"
+                            f"  ·  影响系数 {float(driver.get('effect_rate') or 0) * 100:.2f}%"
+                        )
+                with row_cols[1]:
+                    st.caption(config_type_label)
+                with row_cols[3]:
+                    if st.button("✏️", key=f"edit_driver_{idx}", help="编辑"):
+                        st.session_state.editing_driver_index = idx
+                        st.rerun()
+                with row_cols[4]:
+                    if st.button("🗑️", key=f"delete_driver_{idx}", help="删除"):
+                        st.session_state.driver_configs.pop(idx)
+                        st.session_state.editing_driver_index = None
+                        st.rerun()
+
+        # ── 编辑已有配置 ──
+        edit_idx = st.session_state.editing_driver_index
+        if edit_idx is not None and edit_idx < len(st.session_state.driver_configs):
+            editing = st.session_state.driver_configs[edit_idx]
+            st.markdown(f"##### 编辑配置：{editing['name']}")
+            if editing["config_type"] == CONFIG_TYPE_COVARIATE:
+                candidate_columns = st.session_state.mapping.get("covariate_candidates", [])
+                with st.form("edit_covariate_driver"):
+                    eleft, emiddle, eright = st.columns(3)
+                    ename = eleft.text_input("配置名称", value=editing["name"])
+                    ecolumn = emiddle.selectbox(
+                        "数据字段",
+                        candidate_columns,
+                        index=candidate_columns.index(editing["column"]) if editing["column"] in candidate_columns else 0,
+                    )
+                    eavailability_label = eright.selectbox(
+                        "可用性类型",
+                        ["已知未来", "历史滞后"],
+                        index=0 if editing.get("availability") == AVAILABILITY_KNOWN_FUTURE else 1,
+                    )
+                    estrategy_label = "历史末值延续"
+                    if eavailability_label == "已知未来":
+                        estrategy_label = st.selectbox(
+                            "未来值生成规则",
+                            ["历史末值", "历史均值"],
+                            index=0 if editing.get("future_value_strategy") == FUTURE_VALUE_LAST else 1,
+                        )
+                        ecoeff_percent = st.number_input(
+                            "调整系数 (%)",
+                            min_value=-100.0,
+                            max_value=100.0,
+                            value=float((editing.get("future_value_coeff") or 0) * 100),
+                            step=1.0,
+                        )
+                    esubmitted = st.form_submit_button("保存修改")
+                    ecancel = st.form_submit_button("取消")
+                if esubmitted:
+                    if not ename.strip():
+                        st.error("请填写配置名称。")
+                    elif any(
+                        item.get("name") == ename.strip() and item is not editing
+                        for item in st.session_state.driver_configs
+                    ):
+                        st.error(f'配置名称"{ename.strip()}"已存在。')
+                    elif ecolumn != editing["column"] and any(
+                        item.get("column") == ecolumn for item in st.session_state.driver_configs
+                    ):
+                        st.error(f'字段"{ecolumn}"已配置。')
+                    else:
+                        st.session_state.driver_configs[edit_idx] = {
+                            "name": ename.strip(),
+                            "config_type": CONFIG_TYPE_COVARIATE,
+                            "column": ecolumn,
+                            "availability": (
+                                AVAILABILITY_KNOWN_FUTURE
+                                if eavailability_label == "已知未来"
+                                else AVAILABILITY_HISTORICAL
+                            ),
+                            "future_value_strategy": (
+                                FUTURE_VALUE_MEAN
+                                if estrategy_label == "历史均值"
+                                else FUTURE_VALUE_LAST
+                            ),
+                            "future_value_coeff": float(ecoeff_percent) / 100 if eavailability_label == "已知未来" else None,
+                        }
+                        st.session_state.editing_driver_index = None
+                        st.rerun()
+                if ecancel:
+                    st.session_state.editing_driver_index = None
+                    st.rerun()
+            elif editing["config_type"] == CONFIG_TYPE_GROWTH_RATE:
+                with st.form("edit_growth_rate_driver"):
+                    eleft, eright = st.columns(2)
+                    ename = eleft.text_input("配置名称", value=editing["name"])
+                    egrowth_rate_percent = eright.number_input(
+                        "每预测期增长率 (%)",
+                        min_value=-99.99,
+                        max_value=1000.0,
+                        value=float((editing.get("growth_rate") or 0) * 100),
+                        step=0.1,
+                    )
+                    esubmitted = st.form_submit_button("保存修改")
+                    ecancel = st.form_submit_button("取消")
+                if esubmitted:
+                    if not ename.strip():
+                        st.error("请填写配置名称。")
+                    elif any(
+                        item.get("name") == ename.strip() and item is not editing
+                        for item in st.session_state.driver_configs
+                    ):
+                        st.error(f'配置名称"{ename.strip()}"已存在。')
+                    else:
+                        st.session_state.driver_configs[edit_idx] = {
+                            "name": ename.strip(),
+                            "config_type": CONFIG_TYPE_GROWTH_RATE,
+                            "growth_rate": float(egrowth_rate_percent) / 100,
+                        }
+                        st.session_state.editing_driver_index = None
+                        st.rerun()
+                if ecancel:
+                    st.session_state.editing_driver_index = None
+                    st.rerun()
+            elif editing["config_type"] == CONFIG_TYPE_CALENDAR_FACTOR:
+                with st.form("edit_calendar_factor_driver"):
+                    eleft, emiddle, eright = st.columns(3)
+                    ename = eleft.text_input("事件名称", value=editing["name"])
+                    eimpact_months = emiddle.multiselect(
+                        "影响月份",
+                        options=list(range(1, 13)),
+                        default=editing.get("impact_months", []),
+                        format_func=lambda month: f"{month}月",
+                    )
+                    eimpact_rate_percent = eright.number_input(
+                        "影响率 (%)",
+                        min_value=-99.99,
+                        max_value=1000.0,
+                        value=float((editing.get("impact_rate") or 0) * 100),
+                        step=0.1,
+                    )
+                    esubmitted = st.form_submit_button("保存修改")
+                    ecancel = st.form_submit_button("取消")
+                if esubmitted:
+                    if not ename.strip() or not eimpact_months:
+                        st.error("请填写事件名称并选择至少一个影响月份。")
+                    else:
+                        st.session_state.driver_configs[edit_idx] = {
+                            "name": ename.strip(),
+                            "config_type": CONFIG_TYPE_CALENDAR_FACTOR,
+                            "impact_months": eimpact_months,
+                            "impact_rate": float(eimpact_rate_percent) / 100,
+                        }
+                        st.session_state.editing_driver_index = None
+                        st.rerun()
+                if ecancel:
+                    st.session_state.editing_driver_index = None
+                    st.rerun()
+            else:
+                with st.form("edit_scenario_covariate_driver"):
+                    eleft, emiddle, eright = st.columns(3)
+                    ename = eleft.text_input("协变量名称", value=editing["name"])
+                    ebase_value = emiddle.number_input(
+                        "基准值",
+                        min_value=0.0001,
+                        value=float(editing.get("base_value") or 100.0),
+                        step=1.0,
+                    )
+                    escenario_growth_percent = eright.number_input(
+                        "每期变化率 (%)",
+                        min_value=-99.99,
+                        max_value=1000.0,
+                        value=float((editing.get("scenario_growth_rate") or 0) * 100),
+                        step=0.1,
+                    )
+                    eeffect_rate_percent = st.number_input(
+                        "目标影响系数 (%)",
+                        min_value=-1000.0,
+                        max_value=1000.0,
+                        value=float((editing.get("effect_rate") or 0) * 100),
+                        step=1.0,
+                    )
+                    esubmitted = st.form_submit_button("保存修改")
+                    ecancel = st.form_submit_button("取消")
+                if esubmitted:
+                    if not ename.strip():
+                        st.error("请填写协变量名称。")
+                    else:
+                        st.session_state.driver_configs[edit_idx] = {
+                            "name": ename.strip(),
+                            "config_type": CONFIG_TYPE_SCENARIO_COVARIATE,
+                            "base_value": float(ebase_value),
+                            "scenario_growth_rate": float(escenario_growth_percent) / 100,
+                            "effect_rate": float(eeffect_rate_percent) / 100,
+                        }
+                        st.session_state.editing_driver_index = None
+                        st.rerun()
+                if ecancel:
+                    st.session_state.editing_driver_index = None
+                    st.rerun()
+        st.divider()
+
+    # ── 添加新配置 ──
+    st.markdown("##### 添加新配置")
     driver_type = st.selectbox(
         "配置类型",
         ["协变量", "增长率", "节假日/事件影响", "手工情景协变量"],
@@ -213,13 +464,17 @@ if step == "3 预测配置":
     )
     if driver_type == "协变量":
         candidate_columns = st.session_state.mapping.get("covariate_candidates", [])
+        already_configured = {d.get("column") for d in st.session_state.driver_configs if d.get("column") and d.get("config_type") == CONFIG_TYPE_COVARIATE}
+        available_columns = [c for c in candidate_columns if c not in already_configured]
         if not candidate_columns:
             st.info("请先在字段与质量步骤选择至少一个影响因子与协变量候选字段。")
+        elif not available_columns:
+            st.info("所有候选字段已配置，可在上方编辑已有配置。")
         else:
             with st.form("add_covariate_driver"):
                 left, middle, right = st.columns(3)
                 name = left.text_input("配置名称", placeholder="例如：工作日数")
-                column = middle.selectbox("数据字段", candidate_columns)
+                column = middle.selectbox("数据字段", available_columns)
                 availability_label = right.selectbox(
                     "可用性类型", ["已知未来", "历史滞后"], help="已知未来变量可作为预测期输入。"
                 )
@@ -227,8 +482,12 @@ if step == "3 预测配置":
                 if availability_label == "已知未来":
                     strategy_label = st.selectbox(
                         "未来值生成规则",
-                        ["历史末值延续", "历史均值延续"],
-                        help="未来预测时按该规则生成协变量；回测阶段使用对应期间的实际协变量。",
+                        ["历史末值", "历史均值"],
+                        help="未来预测时按该规则生成协变量基准值；回测阶段使用对应期间的实际协变量。",
+                    )
+                    coeff_percent = st.number_input(
+                        "调整系数 (%)", min_value=-100.0, max_value=100.0, value=0.0, step=1.0,
+                        help="基准值 × (1 + 调整系数)。例如 +10% 表示未来值上浮 10%。",
                     )
                 submitted = st.form_submit_button("添加协变量")
             if submitted:
@@ -237,9 +496,9 @@ if step == "3 预测配置":
                 elif any(
                     item.get("name") == name.strip() for item in st.session_state.driver_configs
                 ):
-                    st.error(f"配置名称“{name.strip()}”已存在。")
+                    st.error(f'配置名称"{name.strip()}"已存在。')
                 elif any(item.get("column") == column for item in st.session_state.driver_configs):
-                    st.error(f"字段“{column}”已配置。")
+                    st.error(f'字段"{column}"已配置。')
                 else:
                     st.session_state.driver_configs.append(
                         {
@@ -253,9 +512,10 @@ if step == "3 预测配置":
                             ),
                             "future_value_strategy": (
                                 FUTURE_VALUE_MEAN
-                                if strategy_label == "历史均值延续"
+                                if strategy_label == "历史均值"
                                 else FUTURE_VALUE_LAST
                             ),
+                            "future_value_coeff": float(coeff_percent) / 100 if availability_label == "已知未来" else None,
                         }
                     )
                     st.rerun()
@@ -271,7 +531,7 @@ if step == "3 预测配置":
             if not name.strip():
                 st.error("请填写配置名称。")
             elif any(item.get("name") == name.strip() for item in st.session_state.driver_configs):
-                st.error(f"配置名称“{name.strip()}”已存在。")
+                st.error(f'配置名称"{name.strip()}"已存在。')
             else:
                 st.session_state.driver_configs.append(
                     {
@@ -299,7 +559,7 @@ if step == "3 预测配置":
             if not name.strip() or not impact_months:
                 st.error("请填写事件名称并选择至少一个影响月份。")
             elif any(item.get("name") == name.strip() for item in st.session_state.driver_configs):
-                st.error(f"配置名称“{name.strip()}”已存在。")
+                st.error(f'配置名称"{name.strip()}"已存在。')
             else:
                 st.session_state.driver_configs.append(
                     {
@@ -331,7 +591,7 @@ if step == "3 预测配置":
             if not name.strip():
                 st.error("请填写协变量名称。")
             elif any(item.get("name") == name.strip() for item in st.session_state.driver_configs):
-                st.error(f"配置名称“{name.strip()}”已存在。")
+                st.error(f'配置名称"{name.strip()}"已存在。')
             else:
                 st.session_state.driver_configs.append(
                     {
@@ -343,70 +603,6 @@ if step == "3 预测配置":
                     }
                 )
                 st.rerun()
-
-    if st.session_state.driver_configs:
-        rows = []
-        for driver in st.session_state.driver_configs:
-            if driver["config_type"] == CONFIG_TYPE_COVARIATE:
-                rows.append(
-                    {
-                        "名称": driver["name"],
-                        "类型": "协变量",
-                        "字段": driver["column"],
-                        "可用性": "已知未来"
-                        if driver["availability"] == AVAILABILITY_KNOWN_FUTURE
-                        else "历史滞后",
-                        "规则": "历史均值延续"
-                        if driver.get("future_value_strategy") == FUTURE_VALUE_MEAN
-                        else "历史末值延续",
-                    }
-                )
-            elif driver["config_type"] == CONFIG_TYPE_GROWTH_RATE:
-                rows.append(
-                    {
-                        "名称": driver["name"],
-                        "类型": "增长率",
-                        "字段": "—",
-                        "可用性": "全部候选模型",
-                        "规则": f"每期 {float(driver['growth_rate']) * 100:.2f}%",
-                    }
-                )
-            elif driver["config_type"] == CONFIG_TYPE_CALENDAR_FACTOR:
-                rows.append(
-                    {
-                        "名称": driver["name"],
-                        "类型": "节假日/事件影响",
-                        "字段": "—",
-                        "可用性": "影响月份："
-                        + "、".join(f"{month}月" for month in driver.get("impact_months", [])),
-                        "规则": f"影响率 {float(driver.get('impact_rate') or 0) * 100:.2f}%",
-                    }
-                )
-            else:
-                rows.append(
-                    {
-                        "名称": driver["name"],
-                        "类型": "手工情景协变量",
-                        "字段": "无历史字段",
-                        "可用性": "输出未来假设",
-                        "规则": (
-                            f"基准 {float(driver.get('base_value') or 0):,.2f}，"
-                            f"每期 {float(driver.get('scenario_growth_rate') or 0) * 100:.2f}%，"
-                            f"影响系数 {float(driver.get('effect_rate') or 0) * 100:.2f}%"
-                        ),
-                    }
-                )
-        st.dataframe(rows, use_container_width=True, hide_index=True)
-        delete_name = st.selectbox(
-            "删除配置", [driver["name"] for driver in st.session_state.driver_configs]
-        )
-        if st.button("删除所选配置"):
-            st.session_state.driver_configs = [
-                driver
-                for driver in st.session_state.driver_configs
-                if driver["name"] != delete_name
-            ]
-            st.rerun()
 
     st.session_state.experiment_runtime_config = {
         "experiment_name": experiment_name,

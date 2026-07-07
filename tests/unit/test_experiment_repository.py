@@ -86,6 +86,7 @@ def test_create_experiment_serializes_typed_driver_configs(tmp_path: Path) -> No
             "column": None,
             "availability": None,
             "future_value_strategy": None,
+            "future_value_coeff": None,
             "growth_rate": 0.01,
             "impact_months": [],
             "impact_rate": None,

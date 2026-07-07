@@ -121,7 +121,7 @@ def main() -> None:
             num_windows=config.num_val_windows,
         )
 
-        progress(WorkerStage.TRAIN_BASELINES, 28, "正在训练并评估三类业务基线")
+        progress(WorkerStage.TRAIN_BASELINES, 28, "正在训练并评估业务基线")
         all_predictions = [baseline_predictions]
 
         custom_predictions, custom_failures = generate_custom_model_backtest_predictions(

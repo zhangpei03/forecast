@@ -43,6 +43,7 @@ def profile_normalized_data(
 ) -> DataProfile:
     detected_freq = freq or detect_series_frequency(data["timestamp"])
     issues: list[QualityIssue] = []
+    historical_data = data[data["target"].notna()].copy()
 
     invalid_timestamps = int(data["timestamp"].isna().sum())
     if invalid_timestamps:
@@ -55,7 +56,25 @@ def profile_normalized_data(
             )
         )
 
-    invalid_targets = int(data["target"].isna().sum())
+    # 区分"未来预填行"（target NaN 且 timestamp 超过该 item 最大历史日期）和真正的历史缺失
+    # 未来预填行不应报 blocking，只计入 info 提示
+    target_na_mask = data["target"].isna()
+    if target_na_mask.any():
+        max_hist_ts_per_item = (
+            data.loc[~target_na_mask].groupby("item_id")["timestamp"].max().rename("_max_hist_ts")
+        )
+        data_with_max = data.join(max_hist_ts_per_item, on="item_id")
+        future_prefilled_mask = target_na_mask & (
+            pd.to_datetime(data_with_max["timestamp"])
+            > pd.to_datetime(data_with_max["_max_hist_ts"])
+        )
+        hist_missing_count = int((target_na_mask & ~future_prefilled_mask).sum())
+        future_prefilled_count = int(future_prefilled_mask.sum())
+    else:
+        hist_missing_count = 0
+        future_prefilled_count = 0
+
+    invalid_targets = hist_missing_count
     if invalid_targets:
         issues.append(
             QualityIssue(
@@ -63,6 +82,16 @@ def profile_normalized_data(
                 "blocking",
                 "目标值存在缺失或非数值记录，需选择处理方式。",
                 invalid_targets,
+            )
+        )
+    if future_prefilled_count:
+        issues.append(
+            QualityIssue(
+                "FUTURE_COVARIATE_ROWS_DETECTED",
+                "info",
+                f"检测到 {future_prefilled_count} 行未来协变量数据，目标值为空；"
+                "已填写的协变量将直接使用，空白协变量按所选未来值规则补齐。",
+                future_prefilled_count,
             )
         )
 
@@ -77,7 +106,9 @@ def profile_normalized_data(
             )
         )
 
-    series_lengths = data.dropna(subset=["timestamp"]).groupby("item_id")["timestamp"].nunique()
+    series_lengths = (
+        historical_data.dropna(subset=["timestamp"]).groupby("item_id")["timestamp"].nunique()
+    )
     too_short = series_lengths[series_lengths < MIN_TRAIN_LENGTH[detected_freq]]
     if not too_short.empty:
         issues.append(
@@ -105,7 +136,7 @@ def profile_normalized_data(
             )
         )
 
-    zero_ratio = float((data["target"] == 0).mean()) if len(data) else 0
+    zero_ratio = float((historical_data["target"] == 0).mean()) if len(historical_data) else 0
     if zero_ratio > 0.30:
         issues.append(
             QualityIssue(
@@ -116,7 +147,7 @@ def profile_normalized_data(
             )
         )
 
-    negative_count = int((data["target"] < 0).sum())
+    negative_count = int((historical_data["target"] < 0).sum())
     if negative_count:
         issues.append(
             QualityIssue(
@@ -127,7 +158,7 @@ def profile_normalized_data(
             )
         )
 
-    gaps = detect_missing_periods(data, detected_freq)
+    gaps = detect_missing_periods(historical_data, detected_freq)
     if gaps:
         issues.append(
             QualityIssue(
@@ -141,7 +172,7 @@ def profile_normalized_data(
 
     blocking_count = sum(1 for issue in issues if issue.severity == "blocking")
     warning_count = sum(1 for issue in issues if issue.severity == "warning")
-    clean_timestamps = pd.to_datetime(data["timestamp"]).dropna()
+    clean_timestamps = pd.to_datetime(historical_data["timestamp"]).dropna()
 
     return DataProfile(
         row_count=int(data.shape[0]),
@@ -166,7 +197,8 @@ def estimate_supported_backtest_windows(
     prediction_length: int,
     requested_windows: int,
 ) -> int:
-    shortest_length = int(data.groupby("item_id")["timestamp"].nunique().min())
+    historical_data = data[data["target"].notna()] if "target" in data else data
+    shortest_length = int(historical_data.groupby("item_id")["timestamp"].nunique().min())
     max_windows = max((shortest_length - prediction_length) // prediction_length, 1)
     return min(requested_windows, max_windows)
 

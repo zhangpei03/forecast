@@ -100,8 +100,9 @@ def generate_autogluon_future_forecast(
         ) from exc
 
     known_covariates = known_covariate_columns(config.driver_configs)
+    training_data = data.dropna(subset=["item_id", "timestamp", "target"]).copy()
     train_ts = TimeSeriesDataFrame.from_data_frame(
-        data[["item_id", "timestamp", "target", *known_covariates]],
+        training_data[["item_id", "timestamp", "target", *known_covariates]],
         id_column="item_id",
         timestamp_column="timestamp",
     )

@@ -57,13 +57,13 @@ services:
 
       # ── nginx 登录跳转(浏览器可达地址 + http 回跳) ──
       SSO_APP_ID: "local-test"
-      SSO_LOGIN_BASE: "http://localhost:18080/auth/sso/login"
+      SSO_LOGIN_BASE: "http://172.24.148.32:18080/auth/sso/login"
       CALLBACK_SCHEME: "http"
 
       # ── sidecar 调用 mock-sso(容器网络地址) ──
       SSO_CHECK_CODE_URL: "http://mock-sso:8080/auth/sso/api/check_code"
       SSO_CHECK_TICKET_URL: "http://mock-sso:8080/auth/sso/api/check_ticket"
-      SSO_LOGOUT_URL: "http://localhost:18080/auth/ldap/logout"
+      SSO_LOGOUT_URL: "http://172.24.148.32:18080/auth/ldap/logout"
       SSO_APP_KEY: "local-test-key"
       # Fernet 密钥(本地固定一个即可); cookie 走 http 故关闭 Secure
       SSO_COOKIE_SECRET: "hzs8V-ToCbfMk3ubYHrMHWDr3eJxv2Rka9K71uS2noE="

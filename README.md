@@ -1,6 +1,6 @@
 # Forecast Lab 企业财务预测评测台
 
-Forecast Lab 是一个阶段一 MVP：财务分析人员上传近三年 Excel 历史数据后，系统完成字段映射、数据质量检查、滚动回测、三类业务基线、AutoGluon TimeSeries 训练、指标评测、结果分析和 Excel 导出。
+Forecast Lab 是一个阶段一 MVP：财务分析人员上传近三年 Excel 历史数据后，系统完成字段映射、数据质量检查、滚动回测、业务基线、AutoGluon TimeSeries 训练、指标评测、结果分析和 Excel 导出。
 
 项目定位是评测“数据是否具备稳定预测性”，不是完整预算系统。
 
@@ -66,7 +66,9 @@ Worker 独立子进程运行，页面通过 SQLite、`progress.json` 和 Parquet
 - Coverage：实际值落在 P10-P90 区间的比例
 - Improvement：最佳模型相对最佳业务基线的 WAPE 改善率
 
-三类业务基线始终参与统一排行榜：Last Value、Seasonal Naive、Rolling Mean。
+业务基线始终参与统一排行榜。日频除 Last Value、Seasonal Naive、Rolling Mean 外，
+还包括 YoY、WoW、MTD Daily Avg，以及面向出行业务的 `YoY Weekday WoW`：
+按自然日同比锚点对齐去年同星期，以去年周环比乘今年前一周基数，并在周环比异常时参考前后同天气、同节假日状态的周环比。
 
 ## 数据隐私
 

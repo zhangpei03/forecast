@@ -13,7 +13,7 @@ from src.services.mapping_service import build_item_id
 YEAR_MONTH_CN_PATTERN = re.compile(r"^(\d{4})年第(\d{1,2})月$")
 YYYYMM_PATTERN = re.compile(r"^\d{6}$")
 NEGATIVE_PARENTHESES_PATTERN = re.compile(r"^\((.+)\)$")
-TEXT_CURRENCY_PATTERN = re.compile(r"[A-Za-z￥¥$€]")
+NUMERIC_PATTERN = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
 
 
 def list_excel_sheets(path: Path) -> list[str]:
@@ -68,9 +68,6 @@ def parse_amount(value: Any) -> float:
     raw_value = str(value).strip()
     if raw_value == "":
         return float("nan")
-    if TEXT_CURRENCY_PATTERN.search(raw_value):
-        return float("nan")
-
     negative = False
     parentheses_match = NEGATIVE_PARENTHESES_PATTERN.match(raw_value)
     if parentheses_match:
@@ -78,6 +75,8 @@ def parse_amount(value: Any) -> float:
         raw_value = parentheses_match.group(1)
 
     normalized = raw_value.replace(",", "")
+    if not NUMERIC_PATTERN.fullmatch(normalized):
+        return float("nan")
     try:
         parsed = float(normalized)
     except ValueError:
@@ -130,6 +129,11 @@ def normalize_finance_dataframe(
         normalized = aggregate_duplicates(normalized, duplicate_strategy)
     if missing_strategy != "block":
         normalized = fill_missing_targets(normalized, missing_strategy)
+        normalized = fill_missing_covariates(
+            normalized,
+            list(dict.fromkeys([*(known_covariates or []), *(past_covariates or [])])),
+            missing_strategy,
+        )
 
     return normalized.sort_values(["item_id", "timestamp"]).reset_index(drop=True)
 
@@ -139,7 +143,8 @@ def aggregate_duplicates(data: pd.DataFrame, strategy: str) -> pd.DataFrame:
     value_columns = [column for column in data.columns if column not in group_columns]
     if strategy == "sum":
         return data.groupby(group_columns, as_index=False).agg(
-            {column: "first" for column in value_columns if column != "target"} | {"target": "sum"}
+            {column: "first" for column in value_columns if column != "target"}
+            | {"target": lambda values: values.sum(min_count=1)}
         )
     if strategy == "last":
         return data.drop_duplicates(group_columns, keep="last")
@@ -152,15 +157,80 @@ def aggregate_duplicates(data: pd.DataFrame, strategy: str) -> pd.DataFrame:
 
 def fill_missing_targets(data: pd.DataFrame, strategy: str) -> pd.DataFrame:
     if strategy == "zero":
-        return data.assign(target=data["target"].fillna(0))
+        # 仅对历史行（target 有值 或 timestamp <= 历史最大日期）填充，未来预填行保留 NaN
+        filled = data.copy()
+        max_hist_ts = (
+            data.loc[data["target"].notna()].groupby("item_id")["timestamp"].max().rename("_mhts")
+        )
+        merged = filled.join(max_hist_ts, on="item_id")
+        is_future = filled["target"].isna() & (
+            pd.to_datetime(merged["timestamp"]) > pd.to_datetime(merged["_mhts"])
+        )
+        filled.loc[~is_future, "target"] = filled.loc[~is_future, "target"].fillna(0)
+        return filled.drop(columns=[], errors="ignore")
     if strategy == "ffill":
         filled = data.sort_values(["item_id", "timestamp"]).copy()
+        max_hist_ts = (
+            filled.loc[filled["target"].notna()]
+            .groupby("item_id")["timestamp"]
+            .max()
+            .rename("_mhts")
+        )
+        merged_ts = filled.join(max_hist_ts, on="item_id")
+        is_future = filled["target"].isna() & (
+            pd.to_datetime(merged_ts["timestamp"]) > pd.to_datetime(merged_ts["_mhts"])
+        )
+        orig_future_target = filled.loc[is_future, "target"].copy()
         filled["target"] = filled.groupby("item_id")["target"].ffill()
+        filled.loc[is_future, "target"] = orig_future_target
         return filled
     if strategy == "interpolate":
         filled = data.sort_values(["item_id", "timestamp"]).copy()
+        max_hist_ts = (
+            filled.loc[filled["target"].notna()]
+            .groupby("item_id")["timestamp"]
+            .max()
+            .rename("_mhts")
+        )
+        merged_ts = filled.join(max_hist_ts, on="item_id")
+        is_future = filled["target"].isna() & (
+            pd.to_datetime(merged_ts["timestamp"]) > pd.to_datetime(merged_ts["_mhts"])
+        )
+        orig_future_target = filled.loc[is_future, "target"].copy()
         filled["target"] = filled.groupby("item_id")["target"].transform(
             lambda series: series.interpolate(method="linear")
         )
+        filled.loc[is_future, "target"] = orig_future_target
         return filled
     raise ValidationError(f"未知缺失值处理方式：{strategy}")
+
+
+def fill_missing_covariates(
+    data: pd.DataFrame,
+    columns: list[str],
+    strategy: str,
+) -> pd.DataFrame:
+    """Fill historical covariate gaps without consuming future blank rows."""
+    available = [column for column in columns if column in data.columns]
+    if not available:
+        return data
+
+    filled = data.sort_values(["item_id", "timestamp"]).copy()
+    historical_mask = filled["target"].notna()
+    historical = filled.loc[historical_mask, ["item_id", *available]].copy()
+    for column in available:
+        values = pd.to_numeric(historical[column], errors="coerce")
+        if strategy == "zero":
+            historical[column] = values.fillna(0.0)
+        elif strategy == "ffill":
+            historical[column] = values.groupby(historical["item_id"]).transform(
+                lambda series: series.ffill().bfill()
+            )
+        elif strategy == "interpolate":
+            historical[column] = values.groupby(historical["item_id"]).transform(
+                lambda series: series.interpolate(method="linear", limit_direction="both")
+            )
+        else:
+            raise ValidationError(f"未知缺失值处理方式：{strategy}")
+    filled.loc[historical_mask, available] = historical[available]
+    return filled

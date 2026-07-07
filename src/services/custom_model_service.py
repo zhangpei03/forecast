@@ -77,9 +77,10 @@ def generate_custom_model_future_forecast(
 ) -> pd.DataFrame:
     configs = normalize_driver_configs(driver_configs)
     actual_data = _future_frame(data, freq, prediction_length, configs)
+    train_data = data.dropna(subset=["item_id", "timestamp", "target"]).copy()
     if model == "AutoARIMA":
         return _predict_auto_arima(
-            train_data=data,
+            train_data=train_data,
             actual_data=actual_data,
             freq=freq,
             prediction_length=prediction_length,
@@ -88,7 +89,7 @@ def generate_custom_model_future_forecast(
         )
     if model == "Prophet":
         return _predict_prophet(
-            train_data=data,
+            train_data=train_data,
             actual_data=actual_data,
             freq=freq,
             prediction_length=prediction_length,
@@ -97,7 +98,7 @@ def generate_custom_model_future_forecast(
         )
     if model == "XGBoost":
         return _predict_xgboost(
-            train_data=data,
+            train_data=train_data,
             actual_data=actual_data,
             freq=freq,
             prediction_length=prediction_length,
@@ -361,8 +362,11 @@ def _future_frame(
     if future.empty:
         frames = []
         for item_id, series in data.groupby("item_id", sort=True):
+            history = series[series["target"].notna()] if "target" in series else series
+            if history.empty:
+                continue
             timestamps = pd.date_range(
-                pd.to_datetime(series["timestamp"]).max(),
+                pd.to_datetime(history["timestamp"]).max(),
                 periods=prediction_length + 1,
                 freq=_pandas_freq(freq),
             )[1:]

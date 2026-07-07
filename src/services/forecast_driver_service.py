@@ -16,6 +16,7 @@ AVAILABILITY_KNOWN_FUTURE = "known_future"
 AVAILABILITY_HISTORICAL = "historical"
 FUTURE_VALUE_LAST = "last_value"
 FUTURE_VALUE_MEAN = "mean_value"
+FUTURE_VALUE_COVARIATE_STRATEGIES = {FUTURE_VALUE_LAST, FUTURE_VALUE_MEAN}
 
 
 def normalize_driver_configs(
@@ -74,7 +75,12 @@ def validate_driver_configs(
                 errors.append(f"协变量字段重复配置：{config.column}。")
             columns.add(config.column)
             numeric_values = pd.to_numeric(data[config.column], errors="coerce")
-            if numeric_values.notna().sum() != len(data):
+            history_mask = (
+                data["target"].notna()
+                if "target" in data.columns
+                else pd.Series(True, index=data.index)
+            )
+            if numeric_values[history_mask].notna().sum() != int(history_mask.sum()):
                 errors.append(f"协变量配置“{name}”必须使用无缺失的数值字段。")
             if config.availability not in {AVAILABILITY_KNOWN_FUTURE, AVAILABILITY_HISTORICAL}:
                 errors.append(f"协变量配置“{name}”缺少可用性类型。")
@@ -83,6 +89,12 @@ def validate_driver_configs(
                 and config.future_value_strategy not in {FUTURE_VALUE_LAST, FUTURE_VALUE_MEAN}
             ):
                 errors.append(f"协变量配置“{name}”缺少未来值生成规则。")
+            if (
+                config.availability == AVAILABILITY_KNOWN_FUTURE
+                and config.future_value_coeff is not None
+                and not np.isfinite(config.future_value_coeff)
+            ):
+                errors.append(f"协变量配置“{name}”调整系数必须为有效数值。")
         elif config.config_type == CONFIG_TYPE_GROWTH_RATE:
             if config.growth_rate is None or not np.isfinite(float(config.growth_rate)):
                 errors.append(f"增长率配置“{name}”必须填写有效数值。")
@@ -134,21 +146,68 @@ def build_future_known_covariates(
     frames: list[pd.DataFrame] = []
     for item_id, series in data.groupby("item_id", sort=True):
         ordered = series.sort_values("timestamp")
+        has_target = "target" in ordered.columns
+        history = ordered[ordered["target"].notna()] if has_target else ordered
+        last_hist_ts = pd.to_datetime(history["timestamp"]).max()
+        future_prefilled = (
+            ordered[
+                ordered["target"].isna() & (pd.to_datetime(ordered["timestamp"]) > last_hist_ts)
+            ]
+            if has_target
+            else pd.DataFrame()
+        )
         timestamps = pd.date_range(
-            pd.to_datetime(ordered["timestamp"]).max(),
+            last_hist_ts,
             periods=prediction_length + 1,
             freq=_pandas_freq(freq),
         )[1:]
         frame = pd.DataFrame({"item_id": item_id, "timestamp": timestamps})
         for column, config in configs_by_column.items():
-            values = pd.to_numeric(ordered[column], errors="coerce").dropna()
+            hist_values = (
+                pd.to_numeric(history[column], errors="coerce").dropna()
+                if column in history.columns
+                else pd.Series(dtype=float)
+            )
             if config.future_value_strategy == FUTURE_VALUE_MEAN:
-                value = float(values.mean()) if not values.empty else np.nan
+                fallback = float(hist_values.mean()) if not hist_values.empty else np.nan
             else:
-                value = float(values.iloc[-1]) if not values.empty else np.nan
-            frame[column] = value
+                fallback = float(hist_values.iloc[-1]) if not hist_values.empty else np.nan
+            coeff = config.future_value_coeff if config.future_value_coeff is not None else 0.0
+            if coeff != 0.0 and not np.isnan(fallback):
+                fallback = fallback * (1.0 + coeff)
+            if not future_prefilled.empty and column in future_prefilled.columns:
+                prefilled = (
+                    future_prefilled[["timestamp", column]]
+                    .copy()
+                    .assign(timestamp=lambda df: pd.to_datetime(df["timestamp"]))
+                    .rename(columns={column: "_val"})
+                )
+                merged = frame.assign(timestamp=pd.to_datetime(frame["timestamp"])).merge(
+                    prefilled, on="timestamp", how="left"
+                )
+                frame[column] = merged["_val"].where(merged["_val"].notna(), fallback).values
+            else:
+                frame[column] = fallback
         frames.append(frame)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+def extract_future_covariate_rows(
+    data: pd.DataFrame,
+    covariate_columns: list[str],
+) -> pd.DataFrame:
+    """Return rows where target is NaN (user-supplied future covariate rows).
+
+    These rows come from the Excel when the user pre-fills covariate values
+    beyond the last historical date but leaves the target column blank.
+    """
+    if "target" not in data.columns or not covariate_columns:
+        return pd.DataFrame(columns=["item_id", "timestamp", *covariate_columns])
+    future_rows = data[data["target"].isna()].copy()
+    available = [c for c in covariate_columns if c in future_rows.columns]
+    if future_rows.empty or not available:
+        return pd.DataFrame(columns=["item_id", "timestamp", *covariate_columns])
+    return future_rows[["item_id", "timestamp", *available]].copy()
 
 
 def apply_growth_rate_adjustments(
@@ -249,8 +308,11 @@ def build_future_driver_assumptions(
         if config.base_value is None or config.scenario_growth_rate is None:
             continue
         for item_id, series in data.groupby("item_id", sort=True):
+            history = series[series["target"].notna()] if "target" in series else series
+            if history.empty:
+                continue
             timestamps = pd.date_range(
-                pd.to_datetime(series["timestamp"]).max(),
+                pd.to_datetime(history["timestamp"]).max(),
                 periods=prediction_length + 1,
                 freq=_pandas_freq(freq),
             )[1:]

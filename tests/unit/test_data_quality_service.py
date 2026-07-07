@@ -3,6 +3,7 @@ import pandas as pd
 from src.services.data_quality_service import (
     detect_missing_periods,
     detect_series_frequency,
+    estimate_supported_backtest_windows,
     profile_normalized_data,
 )
 
@@ -41,3 +42,26 @@ def test_profile_normalized_data_counts_blocking_and_warning_issues() -> None:
     assert profile.blocking_issue_count >= 2
     assert profile.warning_count >= 1
     assert profile.row_count == 4
+
+
+def test_future_covariate_rows_do_not_extend_history_or_backtest_capacity() -> None:
+    timestamps = pd.date_range("2026-01-01", periods=10, freq="D")
+    data = pd.DataFrame(
+        {
+            "item_id": ["A"] * 10,
+            "timestamp": timestamps,
+            "target": [1.0] * 7 + [None] * 3,
+            "weather": [0] * 7 + [1, 0, 1],
+        }
+    )
+
+    profile = profile_normalized_data(data, freq="D", prediction_length=2)
+    windows = estimate_supported_backtest_windows(
+        data,
+        prediction_length=2,
+        requested_windows=5,
+    )
+
+    assert profile.data_end == "2026-01-07"
+    assert profile.average_series_length == 7.0
+    assert windows == 2

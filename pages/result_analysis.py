@@ -283,9 +283,10 @@ with tabs[4]:
                         "可用性": "已知未来"
                         if driver.availability == AVAILABILITY_KNOWN_FUTURE
                         else "历史滞后",
-                        "未来值规则": "历史均值延续"
-                        if driver.future_value_strategy == FUTURE_VALUE_MEAN
-                        else "历史末值延续",
+                        "未来值规则": (
+                            ("历史均值" if driver.future_value_strategy == FUTURE_VALUE_MEAN else "历史末值")
+                            + (f" × {1 + (driver.future_value_coeff or 0):.0%}" if driver.future_value_coeff not in (None, 0) else "")
+                        ),
                     }
                 )
             elif driver.config_type == CONFIG_TYPE_GROWTH_RATE:

@@ -154,3 +154,133 @@ def test_build_future_driver_assumptions_outputs_missing_covariate_scenarios() -
         "B": pytest.approx([105.0, 110.25]),
     }
     assert set(assumptions["adjustment_mode"]) == {"手工影响系数"}
+
+
+def test_future_driver_assumptions_start_after_last_actual_not_prefilled_row() -> None:
+    data = pd.DataFrame(
+        {
+            "item_id": ["A", "A", "A"],
+            "timestamp": pd.to_datetime(["2025-01-01", "2025-02-01", "2025-03-01"]),
+            "target": [100.0, 110.0, None],
+        }
+    )
+    drivers = [
+        ForecastDriverConfig(
+            name="计划订单数",
+            config_type="scenario_covariate",
+            base_value=100.0,
+            scenario_growth_rate=0.05,
+            effect_rate=0.8,
+        )
+    ]
+
+    assumptions = build_future_driver_assumptions(
+        data,
+        drivers,
+        freq="M",
+        prediction_length=1,
+    )
+
+    assert assumptions["timestamp"].tolist() == [pd.Timestamp("2025-03-01")]
+
+
+def test_build_future_known_covariates_uses_prefilled_future_rows() -> None:
+    """当 Excel 中存在 target=NaN 的未来行时，协变量值应直接使用预填值。"""
+    data = pd.DataFrame(
+        {
+            "item_id": ["A", "A", "A", "A", "A"],
+            "timestamp": pd.to_datetime(
+                ["2024-01-01", "2024-02-01", "2024-03-01", "2024-04-01", "2024-05-01"]
+            ),
+            "target": [100.0, 110.0, 120.0, float("nan"), float("nan")],
+            "holiday": [0.0, 0.0, 0.0, 1.0, 0.0],
+        }
+    )
+    drivers = [
+        ForecastDriverConfig(
+            name="节假日",
+            config_type="covariate",
+            column="holiday",
+            availability="known_future",
+            future_value_strategy="last_value",
+        )
+    ]
+    result = build_future_known_covariates(data, drivers, freq="M", prediction_length=2)
+    assert len(result) == 2
+    holidays = result.sort_values("timestamp")["holiday"].tolist()
+    assert holidays == pytest.approx([1.0, 0.0])
+
+
+def test_build_future_known_covariates_fallback_when_no_prefill() -> None:
+    """没有预填未来行时退回 last_value / mean_value 常数策略。"""
+    data = pd.DataFrame(
+        {
+            "item_id": ["A", "A", "A"],
+            "timestamp": pd.to_datetime(["2024-01-01", "2024-02-01", "2024-03-01"]),
+            "target": [100.0, 110.0, 120.0],
+            "holiday": [0.0, 1.0, 0.0],
+        }
+    )
+    drivers_last = [
+        ForecastDriverConfig(
+            name="节假日",
+            config_type="covariate",
+            column="holiday",
+            availability="known_future",
+            future_value_strategy="last_value",
+        )
+    ]
+    drivers_mean = [
+        ForecastDriverConfig(
+            name="节假日",
+            config_type="covariate",
+            column="holiday",
+            availability="known_future",
+            future_value_strategy="mean_value",
+        )
+    ]
+    result_last = build_future_known_covariates(data, drivers_last, freq="M", prediction_length=2)
+    result_mean = build_future_known_covariates(data, drivers_mean, freq="M", prediction_length=2)
+    assert result_last["holiday"].tolist() == pytest.approx([0.0, 0.0])
+    assert result_mean["holiday"].tolist() == pytest.approx([1 / 3, 1 / 3])
+
+
+def test_build_future_known_covariates_applies_coeff() -> None:
+    data = pd.DataFrame(
+        {
+            "item_id": ["A", "A", "A"],
+            "timestamp": pd.to_datetime(["2024-01-01", "2024-02-01", "2024-03-01"]),
+            "target": [100.0, 110.0, 120.0],
+            "holiday": [0.0, 1.0, 0.0],
+        }
+    )
+    # last_value with +20% coeff
+    drivers_coeff = [
+        ForecastDriverConfig(
+            name="节假日",
+            config_type="covariate",
+            column="holiday",
+            availability="known_future",
+            future_value_strategy="last_value",
+            future_value_coeff=0.2,
+        )
+    ]
+    result = build_future_known_covariates(data, drivers_coeff, freq="M", prediction_length=2)
+    # last_value = 0.0, with +20% = 0.0 * 1.2 = 0.0
+    assert result["holiday"].tolist() == pytest.approx([0.0, 0.0])
+
+    # mean_value with +10% coeff
+    drivers_mean_coeff = [
+        ForecastDriverConfig(
+            name="节假日",
+            config_type="covariate",
+            column="holiday",
+            availability="known_future",
+            future_value_strategy="mean_value",
+            future_value_coeff=0.1,
+        )
+    ]
+    result2 = build_future_known_covariates(data, drivers_mean_coeff, freq="M", prediction_length=2)
+    # mean = (0+1+0)/3 = 1/3, with +10% = 1/3 * 1.1
+    expected = (1 / 3) * 1.1
+    assert result2["holiday"].tolist() == pytest.approx([expected, expected])
