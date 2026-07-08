@@ -7,7 +7,7 @@ from src.services.autogluon_service import (
     hyperparameters_for_preset,
 )
 
-_DEEP_MODELS = {"DeepAR", "TemporalFusionTransformer", "PatchTST", "Chronos"}
+_DEEP_MODELS = {"DeepAR", "TemporalFusionTransformer", "PatchTST", "Chronos2"}
 
 
 def test_lightweight_hyperparameters_excludes_heavy_deep_models() -> None:
@@ -43,8 +43,15 @@ def test_high_preset_enables_deep_learning_models() -> None:
     hyperparameters = hyperparameters_for_preset("high_quality")
 
     assert _DEEP_MODELS.issubset(hyperparameters)
-    assert hyperparameters["Chronos"] == {"model_path": "bolt_small"}
+    assert hyperparameters["Chronos2"] == {"model_path": "autogluon/chronos-2"}
     assert {"SeasonalNaive", "ETS", "Theta"}.issubset(hyperparameters)
+
+
+def test_hyperparameters_for_preset_can_select_single_model() -> None:
+    assert hyperparameters_for_preset("medium_quality", "Theta") == {"Theta": {}}
+    assert hyperparameters_for_preset("fast_training", "Chronos") == {
+        "Chronos2": {"model_path": "autogluon/chronos-2"}
+    }
 
 
 def test_align_known_covariates_to_future_uses_series_horizon_order() -> None:

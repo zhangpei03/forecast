@@ -8,7 +8,16 @@ import streamlit as st
 
 from src.core.auth import require_user
 from src.core.config import get_settings
-from src.core.constants import DEFAULT_PREDICTION_LENGTH, TRAINING_PRESETS
+from src.core.constants import (
+    AUTOGLUON_MODEL_NAMES,
+    BASELINE_MODEL_NAMES,
+    CUSTOM_MODEL_NAMES,
+    DEFAULT_PREDICTION_LENGTH,
+    MODEL_FAMILY_AUTOGLUON,
+    MODEL_FAMILY_BASELINE,
+    MODEL_FAMILY_CUSTOM,
+    TRAINING_PRESETS,
+)
 from src.domain.models import ExperimentConfig
 from src.jobs.job_runner import TooManyActiveJobsError, start_training_job
 from src.repositories.experiment_repository import ExperimentRepository
@@ -38,7 +47,7 @@ from src.services.forecast_driver_service import (
 from src.services.mapping_service import guess_mapping_columns
 from src.storage.file_store import get_experiment_dir, sha256_file, write_json
 from src.storage.parquet import write_parquet
-from src.ui.components import page_header, profile_to_json, render_quality_profile
+from src.ui.components import page_header, profile_to_json, render_quality_profile, safe_dataframe
 
 settings = get_settings()
 repository = ExperimentRepository(settings.database_url)
@@ -48,6 +57,54 @@ page_header(
     "新建预测实验",
     "上传 Excel，完成字段映射和数据质量检查，再启动本地评测 Worker。",
 )
+
+
+def _model_options(freq: str) -> dict[str, tuple[str, str]]:
+    baseline_models = (
+        BASELINE_MODEL_NAMES
+        if freq == "D"
+        else ("Last Value", "Seasonal Naive", "Rolling Mean")
+    )
+    options: dict[str, tuple[str, str]] = {}
+    for model in baseline_models:
+        options[f"业务基线：{model}"] = (MODEL_FAMILY_BASELINE, model)
+    for model in CUSTOM_MODEL_NAMES:
+        options[f"外部模型：{model}"] = (MODEL_FAMILY_CUSTOM, model)
+    for model in AUTOGLUON_MODEL_NAMES:
+        options[f"AutoGluon：{model}"] = (MODEL_FAMILY_AUTOGLUON, model)
+    return options
+
+
+_HISTORICAL_DEFAULT_DRIVER_COLUMNS = {
+    "竞争成交率",
+    "客观成交率",
+    "日均非预约tsh",
+    "c补率",
+}
+_EXCLUDED_DRIVER_COLUMNS = {"星期几"}
+
+
+def _driver_column_key(column: str) -> str:
+    return "".join(str(column).split()).casefold()
+
+
+def _is_excluded_driver_column(column: str) -> bool:
+    return _driver_column_key(column) in _EXCLUDED_DRIVER_COLUMNS
+
+
+def _default_availability_for_driver(column: str) -> str:
+    if _driver_column_key(column) in _HISTORICAL_DEFAULT_DRIVER_COLUMNS:
+        return AVAILABILITY_HISTORICAL
+    return AVAILABILITY_KNOWN_FUTURE
+
+
+def _driver_candidate_columns(columns: list[str]) -> list[str]:
+    return [column for column in columns if not _is_excluded_driver_column(column)]
+
+
+def _availability_label(availability: str) -> str:
+    return "历史滞后" if availability == AVAILABILITY_HISTORICAL else "已知未来"
+
 
 step = st.radio(
     "创建步骤",
@@ -95,7 +152,7 @@ if step == "1 上传数据":
             raw = read_excel_sheet(uploaded_path, sheet)
             st.session_state.sheet_name = sheet
             st.session_state.raw_preview = raw
-            st.dataframe(raw.head(50), use_container_width=True, hide_index=True)
+            safe_dataframe(raw.head(50), width="stretch", hide_index=True)
 
 if step == "2 字段与质量":
     if st.session_state.raw_preview is None:
@@ -138,7 +195,7 @@ if step == "2 字段与质量":
         missing_strategy = st.selectbox(
             "目标缺失处理", ["block", "zero", "ffill", "interpolate"], index=0
         )
-        run_quality = st.button("标准化并检查质量", type="primary", use_container_width=True)
+        run_quality = st.button("标准化并检查质量", type="primary", width="stretch")
     with right:
         st.markdown("#### 数据预览与质量")
         if run_quality:
@@ -166,8 +223,8 @@ if step == "2 字段与质量":
             st.session_state.normalized_data = normalized
             st.session_state.data_profile = profile
         if st.session_state.normalized_data is not None:
-            st.dataframe(
-                st.session_state.normalized_data.head(20), use_container_width=True, hide_index=True
+            safe_dataframe(
+                st.session_state.normalized_data.head(20), width="stretch", hide_index=True
             )
             render_quality_profile(st.session_state.data_profile)
 
@@ -177,22 +234,40 @@ if step == "3 预测配置":
         st.stop()
     profile = st.session_state.data_profile
 
+    st.session_state.driver_configs = [
+        driver
+        for driver in st.session_state.driver_configs
+        if not _is_excluded_driver_column(driver.get("column", ""))
+    ]
+    for driver in st.session_state.driver_configs:
+        if driver.get("config_type") == CONFIG_TYPE_COVARIATE and driver.get("column"):
+            default_availability = _default_availability_for_driver(driver["column"])
+            if default_availability == AVAILABILITY_HISTORICAL:
+                driver["availability"] = AVAILABILITY_HISTORICAL
+                driver["future_value_strategy"] = FUTURE_VALUE_LAST
+                driver["future_value_coeff"] = None
+
     # ── 自动初始化：将步骤2选择的协变量候选字段默认带入 driver_configs ──
     if not st.session_state.driver_configs_auto_initialized:
-        covariate_candidates = st.session_state.mapping.get("covariate_candidates", [])
+        covariate_candidates = _driver_candidate_columns(
+            st.session_state.mapping.get("covariate_candidates", [])
+        )
         existing_columns = {
             d.get("column") for d in st.session_state.driver_configs if d.get("column")
         }
         for col in covariate_candidates:
             if col not in existing_columns:
+                availability = _default_availability_for_driver(col)
                 st.session_state.driver_configs.append(
                     {
                         "name": col,
                         "config_type": CONFIG_TYPE_COVARIATE,
                         "column": col,
-                        "availability": AVAILABILITY_KNOWN_FUTURE,
+                        "availability": availability,
                         "future_value_strategy": FUTURE_VALUE_LAST,
-                        "future_value_coeff": 0.0,
+                        "future_value_coeff": 0.0
+                        if availability == AVAILABILITY_KNOWN_FUTURE
+                        else None,
                     }
                 )
         st.session_state.driver_configs_auto_initialized = True
@@ -220,6 +295,9 @@ if step == "3 预测配置":
         metric = st.selectbox("主评测指标", ["WAPE"], disabled=True)
     with c3:
         st.markdown("#### 训练模式")
+        model_options = _model_options(profile.frequency)
+        selected_model_label = st.selectbox("预测方法/模型", list(model_options), index=0)
+        selected_model_family, selected_model_name = model_options[selected_model_label]
         mode = st.selectbox("模式", list(TRAINING_PRESETS), index=1)
         preset_config = TRAINING_PRESETS[mode]
         time_limit = st.number_input(
@@ -463,7 +541,9 @@ if step == "3 预测配置":
         key="driver_config_type",
     )
     if driver_type == "协变量":
-        candidate_columns = st.session_state.mapping.get("covariate_candidates", [])
+        candidate_columns = _driver_candidate_columns(
+            st.session_state.mapping.get("covariate_candidates", [])
+        )
         already_configured = {d.get("column") for d in st.session_state.driver_configs if d.get("column") and d.get("config_type") == CONFIG_TYPE_COVARIATE}
         available_columns = [c for c in candidate_columns if c not in already_configured]
         if not candidate_columns:
@@ -475,8 +555,14 @@ if step == "3 预测配置":
                 left, middle, right = st.columns(3)
                 name = left.text_input("配置名称", placeholder="例如：工作日数")
                 column = middle.selectbox("数据字段", available_columns)
+                default_availability_label = _availability_label(
+                    _default_availability_for_driver(column)
+                )
                 availability_label = right.selectbox(
-                    "可用性类型", ["已知未来", "历史滞后"], help="已知未来变量可作为预测期输入。"
+                    "可用性类型",
+                    ["已知未来", "历史滞后"],
+                    index=0 if default_availability_label == "已知未来" else 1,
+                    help="已知未来变量可作为预测期输入。",
                 )
                 strategy_label = "历史末值延续"
                 if availability_label == "已知未来":
@@ -613,6 +699,9 @@ if step == "3 预测配置":
         "time_limit_seconds": int(time_limit),
         "metric": metric,
         "mode": mode,
+        "selected_model_label": selected_model_label,
+        "selected_model_family": selected_model_family,
+        "selected_model_name": selected_model_name,
         "driver_configs": list(st.session_state.driver_configs),
     }
 
@@ -636,6 +725,7 @@ if step == "4 确认运行":
             "预测频率": profile.frequency,
             "预测周期": config_view["prediction_length"],
             "回测窗口": config_view["num_val_windows"],
+            "预测方法/模型": config_view.get("selected_model_label", "全部模型"),
             "训练模式": config_view["mode"],
             "时间预算": config_view["time_limit_seconds"],
             "已知未来协变量": "、".join(known_covariates) or "—",
@@ -686,6 +776,8 @@ if step == "4 确认运行":
             past_covariates=historical_covariates,
             static_features=mapping["static_features"],
             driver_configs=driver_configs,
+            selected_model_family=runtime.get("selected_model_family", "all"),
+            selected_model_name=runtime.get("selected_model_name", "全部模型"),
             freq=profile.frequency,
             prediction_length=runtime["prediction_length"],
             num_val_windows=runtime["num_val_windows"],

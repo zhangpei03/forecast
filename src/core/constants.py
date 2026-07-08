@@ -59,4 +59,35 @@ TRAINING_PRESETS = {
     },
 }
 
+MODEL_FAMILY_ALL = "all"
+MODEL_FAMILY_BASELINE = "baseline"
+MODEL_FAMILY_CUSTOM = "custom"
+MODEL_FAMILY_AUTOGLUON = "autogluon"
+
+BASELINE_MODEL_NAMES = (
+    "Last Value",
+    "Seasonal Naive",
+    "Rolling Mean",
+    "YoY",
+    "WoW",
+    "MTD Daily Avg",
+    "YoY Weekday WoW",
+    "YoY Weekday DoD",
+    "YWW PRO",
+)
+
+CUSTOM_MODEL_NAMES = ("AutoARIMA", "Prophet", "XGBoost")
+
+AUTOGLUON_MODEL_NAMES = (
+    "SeasonalNaive",
+    "RecursiveTabular",
+    "DirectTabular",
+    "ETS",
+    "Theta",
+    "DeepAR",
+    "TemporalFusionTransformer",
+    "PatchTST",
+    "Chronos2",
+)
+
 QUANTILE_LEVELS = [0.1, 0.5, 0.9]

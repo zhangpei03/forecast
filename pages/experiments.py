@@ -18,7 +18,7 @@ page_header(
 
 left, right = st.columns([1, 0.18])
 with right:
-    if st.button("新建实验", type="primary", use_container_width=True):
+    if st.button("新建实验", type="primary", width="stretch"):
         st.switch_page("pages/create_experiment.py")
 
 experiments = repository.list_experiments(current_user)
@@ -75,6 +75,6 @@ for experiment in filtered[:5]:
             if experiment.status.value == "SUCCEEDED"
             else "pages/run_status.py"
         )
-        if st.button("查看", key=f"open_{experiment.id}", use_container_width=True):
+        if st.button("查看", key=f"open_{experiment.id}", width="stretch"):
             st.query_params["experiment_id"] = experiment.id
             st.switch_page(target_page)

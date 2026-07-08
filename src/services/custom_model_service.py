@@ -10,7 +10,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from src.core.constants import DEFAULT_RANDOM_SEED, SEASONAL_LAG
+from src.core.constants import CUSTOM_MODEL_NAMES, DEFAULT_RANDOM_SEED, SEASONAL_LAG
 from src.domain.models import ForecastDriverConfig
 from src.services.forecast_driver_service import (
     build_future_known_covariates,
@@ -18,9 +18,6 @@ from src.services.forecast_driver_service import (
     known_covariate_columns,
     normalize_driver_configs,
 )
-
-CUSTOM_MODEL_NAMES = ("AutoARIMA", "Prophet", "XGBoost")
-
 
 @dataclass(frozen=True)
 class ModelFailure:
@@ -35,10 +32,12 @@ def generate_custom_model_backtest_predictions(
     prediction_length: int,
     num_windows: int,
     driver_configs: Iterable[ForecastDriverConfig | Mapping[str, object]] | None = None,
+    models: Iterable[str] | None = None,
 ) -> tuple[pd.DataFrame, list[ModelFailure]]:
     failures: list[ModelFailure] = []
     frames: list[pd.DataFrame] = []
     configs = normalize_driver_configs(driver_configs)
+    selected_models = set(models or CUSTOM_MODEL_NAMES)
 
     for window_index in range(num_windows):
         train_data, actual_data = _split_window(data, prediction_length, window_index)
@@ -49,6 +48,8 @@ def generate_custom_model_backtest_predictions(
             ("Prophet", _predict_prophet),
             ("XGBoost", _predict_xgboost),
         ):
+            if model_name not in selected_models:
+                continue
             try:
                 predictions = generator(
                     train_data=train_data,

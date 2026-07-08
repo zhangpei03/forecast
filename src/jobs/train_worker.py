@@ -26,6 +26,12 @@ from pathlib import Path
 
 import pandas as pd
 
+from src.core.constants import (
+    MODEL_FAMILY_ALL,
+    MODEL_FAMILY_AUTOGLUON,
+    MODEL_FAMILY_BASELINE,
+    MODEL_FAMILY_CUSTOM,
+)
 from src.core.config import AppSettings
 from src.core.exceptions import ForecastLabError
 from src.core.logging import configure_worker_logger
@@ -109,46 +115,58 @@ def main() -> None:
             raise ForecastLabError("实验不存在或已被删除")
         config = ExperimentConfig(**summary.config)
         driver_configs = normalize_driver_configs(config.driver_configs)
+        selected_family = config.selected_model_family or MODEL_FAMILY_ALL
+        selected_model = config.selected_model_name
         normalized_data = read_parquet(experiment_dir / "normalized_data.parquet")
         if normalized_data.empty:
             raise ForecastLabError("标准化数据不存在，请重新上传并保存实验")
 
         progress(WorkerStage.BUILD_BACKTEST_WINDOWS, 15, "正在构建时间顺序滚动回测窗口")
-        baseline_predictions = generate_baseline_backtest_predictions(
-            data=normalized_data,
-            freq=config.freq,
-            prediction_length=config.prediction_length,
-            num_windows=config.num_val_windows,
-        )
+        run_all_models = selected_family == MODEL_FAMILY_ALL
+        all_predictions: list[pd.DataFrame] = []
 
-        progress(WorkerStage.TRAIN_BASELINES, 28, "正在训练并评估业务基线")
-        all_predictions = [baseline_predictions]
-
-        custom_predictions, custom_failures = generate_custom_model_backtest_predictions(
-            data=normalized_data,
-            freq=config.freq,
-            prediction_length=config.prediction_length,
-            num_windows=config.num_val_windows,
-            driver_configs=driver_configs,
-        )
-        if not custom_predictions.empty:
-            all_predictions.append(custom_predictions)
-        for failure in custom_failures:
-            logger.warning("Custom model %s failed: %s", failure.model, failure.message)
-
-        progress(WorkerStage.TRAIN_AUTOGLUON, 42, "正在训练 AutoGluon 候选模型")
-        try:
-            autogluon_predictions = generate_autogluon_backtest_predictions(
+        if run_all_models or selected_family == MODEL_FAMILY_BASELINE:
+            progress(WorkerStage.TRAIN_BASELINES, 28, "正在训练并评估业务基线")
+            baseline_predictions = generate_baseline_backtest_predictions(
                 data=normalized_data,
-                config=config,
-                model_dir=experiment_dir / "models",
+                freq=config.freq,
+                prediction_length=config.prediction_length,
+                num_windows=config.num_val_windows,
+                models=None if run_all_models else [selected_model],
             )
-            if not autogluon_predictions.empty:
-                all_predictions.append(autogluon_predictions)
-        except AutoGluonUnavailableError as exc:
-            logger.warning("AutoGluon unavailable: %s", exc)
-        except Exception as exc:
-            logger.exception("AutoGluon training failed; continuing with baselines: %s", exc)
+            if not baseline_predictions.empty:
+                all_predictions.append(baseline_predictions)
+
+        if run_all_models or selected_family == MODEL_FAMILY_CUSTOM:
+            progress(WorkerStage.TRAIN_BASELINES, 34, "正在训练并评估外部模型")
+            custom_predictions, custom_failures = generate_custom_model_backtest_predictions(
+                data=normalized_data,
+                freq=config.freq,
+                prediction_length=config.prediction_length,
+                num_windows=config.num_val_windows,
+                driver_configs=driver_configs,
+                models=None if run_all_models else [selected_model],
+            )
+            if not custom_predictions.empty:
+                all_predictions.append(custom_predictions)
+            for failure in custom_failures:
+                logger.warning("Custom model %s failed: %s", failure.model, failure.message)
+
+        if run_all_models or selected_family == MODEL_FAMILY_AUTOGLUON:
+            progress(WorkerStage.TRAIN_AUTOGLUON, 42, "正在训练 AutoGluon 候选模型")
+            try:
+                autogluon_predictions = generate_autogluon_backtest_predictions(
+                    data=normalized_data,
+                    config=config,
+                    model_dir=experiment_dir / "models",
+                    selected_model=None if run_all_models else selected_model,
+                )
+                if not autogluon_predictions.empty:
+                    all_predictions.append(autogluon_predictions)
+            except AutoGluonUnavailableError as exc:
+                logger.warning("AutoGluon unavailable: %s", exc)
+            except Exception as exc:
+                logger.exception("AutoGluon training failed; continuing with available models: %s", exc)
 
         progress(WorkerStage.CALCULATE_METRICS, 64, "正在统一计算 WAPE、MAE、Bias 与覆盖率")
         backtest_predictions = apply_forecast_driver_adjustments(
@@ -159,13 +177,20 @@ def main() -> None:
         leaderboard = evaluate_models(backtest_predictions)
         best_model = choose_best_model(leaderboard)
         best_baseline = choose_best_baseline(leaderboard)
-        if best_baseline is None:
-            raise ForecastLabError("业务基线评测失败，无法形成对比结论")
+        baseline_model_name = (
+            str(best_baseline["model"]) if best_baseline is not None else str(best_model["model"])
+        )
+        fallback_baseline_model = str(best_baseline["model"]) if best_baseline is not None else "Last Value"
+        baseline_wape = (
+            float(best_baseline["wape"])
+            if best_baseline is not None and pd.notna(best_baseline["wape"])
+            else None
+        )
 
         window_metrics = evaluate_by_window(
             backtest_predictions,
             best_model=str(best_model["model"]),
-            best_baseline=str(best_baseline["model"]),
+            best_baseline=baseline_model_name,
         )
         improved_windows = int(window_metrics["improved"].sum()) if not window_metrics.empty else 0
         total_windows = int(window_metrics.shape[0])
@@ -180,8 +205,8 @@ def main() -> None:
         conclusion = build_business_conclusion(
             best_model=str(best_model["model"]),
             best_wape=float(best_model["wape"]) if pd.notna(best_model["wape"]) else None,
-            best_baseline=str(best_baseline["model"]),
-            baseline_wape=float(best_baseline["wape"]) if pd.notna(best_baseline["wape"]) else None,
+            best_baseline=baseline_model_name,
+            baseline_wape=baseline_wape,
             improved_windows=improved_windows,
             total_windows=total_windows,
             high_risk_series_count=high_risk_series_count,
@@ -206,7 +231,7 @@ def main() -> None:
                     data=normalized_data,
                     freq=config.freq,
                     prediction_length=config.prediction_length,
-                    model=str(best_baseline["model"]),
+                    model=fallback_baseline_model,
                 )
         elif str(best_model["model_type"]) == "基线":
             future_forecast = generate_baseline_future_forecast(
@@ -222,13 +247,16 @@ def main() -> None:
                     config=config,
                     model_dir=experiment_dir / "models",
                     model_name=str(best_model["model"]),
+                    selected_model=(
+                        selected_model if selected_family == MODEL_FAMILY_AUTOGLUON else None
+                    ),
                 )
             except AutoGluonUnavailableError:
                 future_forecast = generate_baseline_future_forecast(
                     data=normalized_data,
                     freq=config.freq,
                     prediction_length=config.prediction_length,
-                    model=str(best_baseline["model"]),
+                    model=fallback_baseline_model,
                 )
             except Exception as exc:
                 logger.exception(
@@ -239,7 +267,7 @@ def main() -> None:
                     data=normalized_data,
                     freq=config.freq,
                     prediction_length=config.prediction_length,
-                    model=str(best_baseline["model"]),
+                    model=fallback_baseline_model,
                 )
 
         future_forecast = apply_forecast_driver_adjustments(future_forecast, driver_configs)
@@ -285,14 +313,14 @@ def main() -> None:
 
         improvement = calculate_improvement(
             float(best_model["wape"]) if pd.notna(best_model["wape"]) else None,
-            float(best_baseline["wape"]) if pd.notna(best_baseline["wape"]) else None,
+            baseline_wape,
         )
         repository.update_results(
             args.experiment_id,
             status=ExperimentStatus.SUCCEEDED,
             best_model=str(best_model["model"]),
             best_wape=float(best_model["wape"]) if pd.notna(best_model["wape"]) else None,
-            baseline_wape=float(best_baseline["wape"]) if pd.notna(best_baseline["wape"]) else None,
+            baseline_wape=baseline_wape,
             improvement_rate=improvement,
             owner_ldap=args.owner_ldap,
         )

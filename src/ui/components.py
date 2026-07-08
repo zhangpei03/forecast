@@ -8,6 +8,14 @@ import streamlit as st
 from src.domain.models import DataProfile, ExperimentSummary
 
 
+def safe_dataframe(data, **kwargs) -> None:
+    if 'use_container_width' in kwargs:
+        kwargs.setdefault(
+            'width', 'stretch' if kwargs.pop('use_container_width') else 'content'
+        )
+    st.dataframe(_arrow_safe_frame(data), **kwargs)
+
+
 def page_header(title: str, subtitle: str, badge: str | None = None) -> None:
     badge_html = f' <span class="fl-badge fl-badge-success">{badge}</span>' if badge else ""
     st.markdown(
@@ -54,7 +62,7 @@ def render_experiment_cards(experiments: list[ExperimentSummary]) -> None:
                 "实验ID": experiment.id,
             }
         )
-    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    safe_dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
 
 def render_quality_profile(profile: DataProfile) -> None:
@@ -77,7 +85,7 @@ def render_quality_profile(profile: DataProfile) -> None:
         for issue in profile.issues
     ]
     if issue_rows:
-        st.dataframe(pd.DataFrame(issue_rows), hide_index=True, use_container_width=True)
+        safe_dataframe(pd.DataFrame(issue_rows), hide_index=True, width="stretch")
     else:
         st.success("数据质量检查通过，未发现阻断问题。")
 
@@ -94,3 +102,19 @@ def _range_text(start: str | None, end: str | None) -> str:
 
 def _format_percent(value: float | None) -> str:
     return "—" if value is None else f"{value * 100:.1f}%"
+
+
+def _arrow_safe_frame(data):
+    if isinstance(data, pd.DataFrame):
+        frame = data.copy()
+    else:
+        frame = pd.DataFrame(data)
+    for column in frame.select_dtypes(include=['object']).columns:
+        frame[column] = frame[column].map(_arrow_safe_value)
+    return frame
+
+
+def _arrow_safe_value(value) -> str:
+    if pd.api.types.is_scalar(value):
+        return "" if pd.isna(value) else str(value)
+    return str(value)

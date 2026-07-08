@@ -31,8 +31,7 @@ RUN set -eux; \
     INDEX="${PIP_INDEX_URL:-$(pip config get global.index-url 2>/dev/null || true)}"; \
     echo "Resolved PyPI index: ${INDEX:-<base image default>}"; \
     pip install --no-cache-dir ${INDEX:+-i "$INDEX"} "uv>=0.5,<1"; \
-    sed -i '/\[tool.uv.sources\]/,/^$/{ /torch/d }' pyproject.toml; \
-    sed -i '/pytorch-cpu/,+3d' pyproject.toml; \
+    sed -i '/^\[tool\.uv\.sources\]/,/^$/d; /^\[\[tool\.uv\.index\]\]/,/^$/d' pyproject.toml; \
     uv sync --frozen --no-dev ${INDEX:+--default-index "$INDEX"}
 
 # ── Stage 2: runtime ──

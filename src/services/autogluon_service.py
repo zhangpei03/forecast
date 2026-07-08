@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from src.core.constants import AUTOGLUON_MODEL_NAMES
 from src.domain.models import ExperimentConfig
 from src.services.forecast_driver_service import (
     build_future_known_covariates,
@@ -20,7 +21,9 @@ def generate_autogluon_backtest_predictions(
     data: pd.DataFrame,
     config: ExperimentConfig,
     model_dir: Path,
+    selected_model: str | None = None,
 ) -> pd.DataFrame:
+    selected_model = _normalize_model_name(selected_model)
     try:
         from autogluon.timeseries import TimeSeriesDataFrame, TimeSeriesPredictor
     except ImportError as exc:
@@ -64,10 +67,10 @@ def generate_autogluon_backtest_predictions(
         predictor.fit(
             train_ts,
             presets=config.preset,
-            hyperparameters=hyperparameters_for_preset(config.preset),
+            hyperparameters=hyperparameters_for_preset(config.preset, selected_model),
             time_limit=max(120, int(config.time_limit_seconds / max(config.num_val_windows, 1))),
             random_seed=config.random_seed,
-            enable_ensemble=True,
+            enable_ensemble=selected_model is None,
         )
         future_covariates = None
         if known_covariates:
@@ -79,7 +82,12 @@ def generate_autogluon_backtest_predictions(
             )
         raw_predictions = predictor.predict(train_ts, known_covariates=future_covariates)
         frames.append(
-            _format_autogluon_predictions(raw_predictions, actual_df, f"W{window_index + 1}")
+            _format_autogluon_predictions(
+                raw_predictions,
+                actual_df,
+                f"W{window_index + 1}",
+                model_name=selected_model or "AutoGluon",
+            )
         )
 
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
@@ -91,7 +99,10 @@ def generate_autogluon_future_forecast(
     config: ExperimentConfig,
     model_dir: Path,
     model_name: str,
+    selected_model: str | None = None,
 ) -> pd.DataFrame:
+    selected_model = _normalize_model_name(selected_model)
+    model_name = _normalize_model_name(model_name) or ""
     try:
         from autogluon.timeseries import TimeSeriesDataFrame, TimeSeriesPredictor
     except ImportError as exc:
@@ -118,12 +129,12 @@ def generate_autogluon_future_forecast(
     predictor.fit(
         train_ts,
         presets=config.preset,
-        hyperparameters=hyperparameters_for_preset(config.preset),
+        hyperparameters=hyperparameters_for_preset(config.preset, selected_model),
         time_limit=config.time_limit_seconds,
         random_seed=config.random_seed,
-        enable_ensemble=True,
+        enable_ensemble=selected_model is None,
     )
-    model_for_prediction = None if model_name in {"", "AutoGluon"} else model_name
+    model_for_prediction = None if selected_model or model_name in {"", "AutoGluon"} else model_name
     future_covariates = None
     if known_covariates:
         future_data = build_future_known_covariates(
@@ -152,7 +163,7 @@ def generate_autogluon_future_forecast(
             "0.9": "forecast_p90",
         }
     )
-    future["model"] = model_name or "AutoGluon"
+    future["model"] = selected_model or model_name or "AutoGluon"
     future["model_type"] = "AutoGluon"
     future["actual"] = pd.NA
     future["error"] = pd.NA
@@ -182,6 +193,8 @@ def _format_autogluon_predictions(
     raw_predictions: pd.DataFrame,
     actual: pd.DataFrame,
     window_id: str,
+    *,
+    model_name: str = "AutoGluon",
 ) -> pd.DataFrame:
     predictions = raw_predictions.reset_index().rename(
         columns={
@@ -202,7 +215,7 @@ def _format_autogluon_predictions(
         how="left",
     ).rename(columns={"target": "actual"})
     joined["window_id"] = window_id
-    joined["model"] = "AutoGluon"
+    joined["model"] = model_name
     joined["model_type"] = "AutoGluon"
     joined["error"] = joined["forecast_p50"] - joined["actual"]
     joined["absolute_error"] = joined["error"].abs()
@@ -257,11 +270,11 @@ def _deep_hyperparameters() -> dict[str, dict]:
     hyperparameters["DeepAR"] = {}
     hyperparameters["TemporalFusionTransformer"] = {}
     hyperparameters["PatchTST"] = {}
-    hyperparameters["Chronos"] = {"model_path": "bolt_small"}
+    hyperparameters["Chronos2"] = {"model_path": "autogluon/chronos-2"}
     return hyperparameters
 
 
-def hyperparameters_for_preset(preset: str) -> dict[str, dict]:
+def hyperparameters_for_preset(preset: str, selected_model: str | None = None) -> dict[str, dict]:
     """按训练档位选择 AutoGluon 候选模型集合。
 
     - ``fast_training``: 轻量统计 + 树模型, 最快给出可预测性结论。
@@ -270,10 +283,31 @@ def hyperparameters_for_preset(preset: str) -> dict[str, dict]:
     """
 
     if preset == "high_quality":
-        return _deep_hyperparameters()
-    if preset == "fast_training":
-        return _lightweight_hyperparameters()
-    return _standard_hyperparameters()
+        hyperparameters = _deep_hyperparameters()
+    elif preset == "fast_training":
+        hyperparameters = _lightweight_hyperparameters()
+    else:
+        hyperparameters = _standard_hyperparameters()
+    selected_model = _normalize_model_name(selected_model)
+    if not selected_model:
+        return hyperparameters
+    if selected_model not in AUTOGLUON_MODEL_NAMES:
+        raise ValueError(f"Unsupported AutoGluon model: {selected_model}")
+    return {selected_model: hyperparameters.get(selected_model, _single_model_defaults(selected_model))}
+
+
+def _normalize_model_name(model_name: str | None) -> str | None:
+    if model_name == "Chronos":
+        return "Chronos2"
+    return model_name
+
+
+def _single_model_defaults(model_name: str) -> dict:
+    if model_name == "Chronos2":
+        return {"model_path": "autogluon/chronos-2"}
+    if model_name in {"RecursiveTabular", "DirectTabular"}:
+        return {"model_name": "GBM"}
+    return {}
 
 
 def _align_known_covariates_to_future(

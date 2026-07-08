@@ -1,5 +1,7 @@
 .git
 .venv
+.uv-cache
+.uv-python
 runtime
 __pycache__
 *.pyc

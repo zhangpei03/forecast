@@ -95,3 +95,18 @@ def test_build_business_conclusion_is_metric_based() -> None:
     assert "8.6%" in conclusion
     assert "35.8%" in conclusion
     assert "稳定领先" in conclusion
+
+
+def test_build_business_conclusion_handles_single_model_mode() -> None:
+    conclusion = build_business_conclusion(
+        best_model="XGBoost",
+        best_wape=0.12,
+        best_baseline="XGBoost",
+        baseline_wape=None,
+        improved_windows=0,
+        total_windows=3,
+        high_risk_series_count=1,
+    )
+
+    assert "单模型回测" in conclusion
+    assert "不计算相对基线改善率" in conclusion

@@ -174,6 +174,13 @@ def build_business_conclusion(
     improvement = calculate_improvement(best_wape, baseline_wape)
     stability = classify_stability(improved_windows, total_windows)
     best_wape_text = _format_percent(best_wape)
+    if baseline_wape is None or best_baseline == best_model:
+        return (
+            f"{best_model} 完成单模型回测，聚合 WAPE 为 {best_wape_text}。"
+            f"本次未同时运行业务基线，因此不计算相对基线改善率。"
+            f"仍有 {high_risk_series_count} 条序列 WAPE 高于 30%，"
+            f"建议进一步检查异常值或补充业务驱动变量。"
+        )
     baseline_wape_text = _format_percent(baseline_wape)
     improvement_text = _format_percent(improvement)
     return (

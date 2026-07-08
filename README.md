@@ -67,8 +67,8 @@ Worker 独立子进程运行，页面通过 SQLite、`progress.json` 和 Parquet
 - Improvement：最佳模型相对最佳业务基线的 WAPE 改善率
 
 业务基线始终参与统一排行榜。日频除 Last Value、Seasonal Naive、Rolling Mean 外，
-还包括 YoY、WoW、MTD Daily Avg，以及面向出行业务的 `YoY Weekday WoW`：
-按自然日同比锚点对齐去年同星期，以去年周环比乘今年前一周基数，并在周环比异常时参考前后同天气、同节假日状态的周环比。
+还包括 YoY、WoW、MTD Daily Avg，以及面向出行业务的 `YoY Weekday WoW` / `YoY Weekday DoD`：
+按自然日同比锚点对齐去年同星期，分别使用去年周环比或日环比滚动今年基数，并在比例异常时参考前后同星期比例中位数。
 
 ## 数据隐私
 

@@ -65,3 +65,26 @@ def test_custom_models_accept_known_future_covariates() -> None:
         "Prophet": 7,
         "XGBoost": 7,
     }
+
+
+def test_custom_model_backtest_can_run_single_selected_model() -> None:
+    dates = pd.date_range("2024-01-01", periods=120, freq="D")
+    data = pd.DataFrame(
+        {
+            "item_id": ["A"] * len(dates),
+            "timestamp": dates,
+            "target": 1000 + np.arange(len(dates)) * 2 + np.sin(np.arange(len(dates))) * 5,
+        }
+    )
+
+    predictions, failures = generate_custom_model_backtest_predictions(
+        data=data,
+        freq="D",
+        prediction_length=7,
+        num_windows=1,
+        models=["XGBoost"],
+    )
+
+    assert failures == []
+    assert set(predictions["model"]) == {"XGBoost"}
+    assert predictions.shape[0] == 7

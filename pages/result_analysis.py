@@ -24,7 +24,7 @@ from src.services.forecast_driver_service import (
 )
 from src.storage.file_store import get_experiment_dir, read_json
 from src.storage.parquet import read_parquet
-from src.ui.components import page_header
+from src.ui.components import page_header, safe_dataframe
 
 settings = get_settings()
 repository = ExperimentRepository(settings.database_url)
@@ -117,7 +117,7 @@ with col_b:
             file_name=export_path.name,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary",
-            use_container_width=True,
+            width="stretch",
         )
 
 st.markdown(
@@ -160,7 +160,7 @@ with tabs[0]:
                 future_forecast=future,
                 model=metric_model,
             ),
-            use_container_width=True,
+            width="stretch",
             config={"displaylogo": False},
             key="overview_trend_chart",
         )
@@ -179,10 +179,10 @@ with tabs[0]:
     c_left, c_right = st.columns([0.58, 0.42])
     with c_left:
         st.markdown("### 回测窗口表现")
-        st.dataframe(window_metrics, use_container_width=True, hide_index=True)
+        safe_dataframe(window_metrics, width="stretch", hide_index=True)
     with c_right:
         st.markdown("### 模型与基线 Top 5")
-        st.dataframe(leaderboard.head(5), use_container_width=True, hide_index=True)
+        safe_dataframe(leaderboard.head(5), width="stretch", hide_index=True)
 
 with tabs[1]:
     item_options = ["全部序列", *sorted(backtest["item_id"].dropna().astype(str).unique().tolist())]
@@ -196,14 +196,14 @@ with tabs[1]:
             model=selected_model,
             item_id=selected_item,
         ),
-        use_container_width=True,
+        width="stretch",
         config={"displaylogo": False},
         key="trend_detail_chart",
     )
     detail = backtest[backtest["model"].eq(selected_model)]
     if selected_item != "全部序列":
         detail = detail[detail["item_id"].eq(selected_item)]
-    st.dataframe(_finance_detail(detail), use_container_width=True, hide_index=True)
+    safe_dataframe(_finance_detail(detail), width="stretch", hide_index=True)
 
 with tabs[2]:
     selected_model = st.selectbox("偏差模型", leaderboard["model"].tolist(), key="deviation_model")
@@ -224,19 +224,19 @@ with tabs[2]:
     g1, g2 = st.columns(2)
     g1.plotly_chart(
         build_deviation_bar_figure(backtest, selected_model, selected_item),
-        use_container_width=True,
+        width="stretch",
         key="deviation_bar_chart",
     )
     g2.plotly_chart(
         build_actual_vs_forecast_figure(backtest, selected_model, selected_item),
-        use_container_width=True,
+        width="stretch",
         key="deviation_scatter_chart",
     )
-    st.dataframe(_finance_detail(selected), use_container_width=True, hide_index=True)
+    safe_dataframe(_finance_detail(selected), width="stretch", hide_index=True)
 
 with tabs[3]:
     st.markdown("### 模型评测排行榜")
-    st.dataframe(leaderboard, use_container_width=True, hide_index=True)
+    safe_dataframe(leaderboard, width="stretch", hide_index=True)
 
 with tabs[4]:
     c1, c2, c3 = st.columns(3)
@@ -265,6 +265,7 @@ with tabs[4]:
             {
                 "预测周期": summary.config.get("prediction_length"),
                 "回测窗口": summary.config.get("num_val_windows"),
+                "预测模型": summary.config.get("selected_model_name", "全部模型"),
                 "训练模式": summary.config.get("preset"),
                 "时间预算": summary.config.get("time_limit_seconds"),
             },
@@ -324,13 +325,13 @@ with tabs[4]:
                         ),
                     }
                 )
-        st.dataframe(rows, use_container_width=True, hide_index=True)
+        safe_dataframe(rows, width="stretch", hide_index=True)
     if not future_driver_assumptions.empty:
         st.markdown("### 未来手工驱动假设")
-        st.dataframe(future_driver_assumptions, use_container_width=True, hide_index=True)
+        safe_dataframe(future_driver_assumptions, width="stretch", hide_index=True)
     st.markdown("### 数据质量摘要")
     profile = read_json(experiment_dir / "data_profile.json")
-    st.dataframe(pd.DataFrame(profile.get("issues", [])), use_container_width=True, hide_index=True)
+    safe_dataframe(pd.DataFrame(profile.get("issues", [])), width="stretch", hide_index=True)
     with st.expander("运行日志", expanded=False):
         log_path = experiment_dir / "run.log"
         st.code(log_path.read_text(encoding="utf-8")[-8000:] if log_path.exists() else "暂无日志")
