@@ -8,6 +8,7 @@ from src.core.constants import AUTOGLUON_MODEL_NAMES
 from src.domain.models import ExperimentConfig
 from src.services.forecast_driver_service import (
     build_future_known_covariates,
+    historical_covariate_columns,
     known_covariate_columns,
 )
 
@@ -22,8 +23,11 @@ def generate_autogluon_backtest_predictions(
     config: ExperimentConfig,
     model_dir: Path,
     selected_model: str | None = None,
+    selected_models: list[str] | None = None,
 ) -> pd.DataFrame:
-    selected_model = _normalize_model_name(selected_model)
+    selected_models = _normalize_model_names(
+        selected_models if selected_models is not None else ([selected_model] if selected_model else None)
+    )
     try:
         from autogluon.timeseries import TimeSeriesDataFrame, TimeSeriesPredictor
     except ImportError as exc:
@@ -32,10 +36,10 @@ def generate_autogluon_backtest_predictions(
         ) from exc
 
     frames: list[pd.DataFrame] = []
-    known_covariates = known_covariate_columns(config.driver_configs)
     clean_data = data.dropna(subset=["item_id", "timestamp", "target"]).sort_values(
         ["item_id", "timestamp"]
     )
+    known_covariates, past_covariates = _autogluon_covariate_columns(config, clean_data)
     for window_index in range(config.num_val_windows):
         train_frames = []
         actual_frames = []
@@ -51,9 +55,10 @@ def generate_autogluon_backtest_predictions(
         train_df = pd.concat(train_frames, ignore_index=True)
         actual_df = pd.concat(actual_frames, ignore_index=True)
         train_ts = TimeSeriesDataFrame.from_data_frame(
-            train_df[["item_id", "timestamp", "target", *known_covariates]],
+            train_df[_time_series_input_columns(train_df, known_covariates, past_covariates)],
             id_column="item_id",
             timestamp_column="timestamp",
+            static_features_df=_static_features_frame(train_df, config.static_features),
         )
         predictor = TimeSeriesPredictor(
             target="target",
@@ -67,10 +72,10 @@ def generate_autogluon_backtest_predictions(
         predictor.fit(
             train_ts,
             presets=config.preset,
-            hyperparameters=hyperparameters_for_preset(config.preset, selected_model),
+            hyperparameters=hyperparameters_for_preset(config.preset, selected_models),
             time_limit=max(120, int(config.time_limit_seconds / max(config.num_val_windows, 1))),
             random_seed=config.random_seed,
-            enable_ensemble=selected_model is None,
+            enable_ensemble=selected_models is None,
         )
         future_covariates = None
         if known_covariates:
@@ -80,15 +85,22 @@ def generate_autogluon_backtest_predictions(
                 id_column="item_id",
                 timestamp_column="timestamp",
             )
-        raw_predictions = predictor.predict(train_ts, known_covariates=future_covariates)
-        frames.append(
-            _format_autogluon_predictions(
-                raw_predictions,
-                actual_df,
-                f"W{window_index + 1}",
-                model_name=selected_model or "AutoGluon",
+        for internal_model_name, output_model_name in _prediction_model_pairs(
+            predictor,
+            selected_models,
+        ):
+            predict_kwargs = {"known_covariates": future_covariates}
+            if internal_model_name is not None:
+                predict_kwargs["model"] = internal_model_name
+            raw_predictions = predictor.predict(train_ts, **predict_kwargs)
+            frames.append(
+                _format_autogluon_predictions(
+                    raw_predictions,
+                    actual_df,
+                    f"W{window_index + 1}",
+                    model_name=output_model_name,
+                )
             )
-        )
 
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
@@ -110,12 +122,15 @@ def generate_autogluon_future_forecast(
             "AutoGluon TimeSeries 未安装或当前 Python 环境不兼容。"
         ) from exc
 
-    known_covariates = known_covariate_columns(config.driver_configs)
     training_data = data.dropna(subset=["item_id", "timestamp", "target"]).copy()
+    known_covariates, past_covariates = _autogluon_covariate_columns(config, training_data)
     train_ts = TimeSeriesDataFrame.from_data_frame(
-        training_data[["item_id", "timestamp", "target", *known_covariates]],
+        training_data[
+            _time_series_input_columns(training_data, known_covariates, past_covariates)
+        ],
         id_column="item_id",
         timestamp_column="timestamp",
+        static_features_df=_static_features_frame(training_data, config.static_features),
     )
     predictor = TimeSeriesPredictor(
         target="target",
@@ -274,7 +289,10 @@ def _deep_hyperparameters() -> dict[str, dict]:
     return hyperparameters
 
 
-def hyperparameters_for_preset(preset: str, selected_model: str | None = None) -> dict[str, dict]:
+def hyperparameters_for_preset(
+    preset: str,
+    selected_models: str | list[str] | None = None,
+) -> dict[str, dict]:
     """按训练档位选择 AutoGluon 候选模型集合。
 
     - ``fast_training``: 轻量统计 + 树模型, 最快给出可预测性结论。
@@ -288,12 +306,18 @@ def hyperparameters_for_preset(preset: str, selected_model: str | None = None) -
         hyperparameters = _lightweight_hyperparameters()
     else:
         hyperparameters = _standard_hyperparameters()
-    selected_model = _normalize_model_name(selected_model)
-    if not selected_model:
+    selected_model_names = _normalize_model_names(selected_models)
+    if not selected_model_names:
         return hyperparameters
-    if selected_model not in AUTOGLUON_MODEL_NAMES:
-        raise ValueError(f"Unsupported AutoGluon model: {selected_model}")
-    return {selected_model: hyperparameters.get(selected_model, _single_model_defaults(selected_model))}
+    unsupported = [
+        model_name for model_name in selected_model_names if model_name not in AUTOGLUON_MODEL_NAMES
+    ]
+    if unsupported:
+        raise ValueError(f"Unsupported AutoGluon model: {', '.join(unsupported)}")
+    return {
+        model_name: hyperparameters.get(model_name, _single_model_defaults(model_name))
+        for model_name in selected_model_names
+    }
 
 
 def _normalize_model_name(model_name: str | None) -> str | None:
@@ -302,12 +326,130 @@ def _normalize_model_name(model_name: str | None) -> str | None:
     return model_name
 
 
+def _normalize_model_names(model_names: str | list[str] | None) -> list[str] | None:
+    if model_names is None:
+        return None
+    if isinstance(model_names, str):
+        model_names = [model_names]
+    normalized = []
+    for model_name in model_names:
+        clean_name = _normalize_model_name(str(model_name).strip())
+        if clean_name and clean_name not in normalized:
+            normalized.append(clean_name)
+    return normalized or None
+
+
+def _prediction_model_pairs(
+    predictor,
+    selected_models: list[str] | None,
+) -> list[tuple[str | None, str]]:
+    if not selected_models:
+        return [(None, "AutoGluon")]
+    available = _available_model_names(predictor)
+    pairs: list[tuple[str | None, str]] = []
+    for selected_model in selected_models:
+        internal_model = _match_autogluon_model_name(selected_model, available)
+        pairs.append((internal_model, selected_model))
+    return pairs
+
+
+def _available_model_names(predictor) -> list[str]:
+    try:
+        return list(predictor.model_names())
+    except Exception:
+        return []
+
+
+def _match_autogluon_model_name(selected_model: str, available_models: list[str]) -> str | None:
+    if selected_model in available_models:
+        return selected_model
+    for model_name in available_models:
+        if model_name.startswith(selected_model):
+            return model_name
+    if selected_model == "Chronos2":
+        for model_name in available_models:
+            if model_name.startswith("Chronos"):
+                return model_name
+    return selected_model
+
+
 def _single_model_defaults(model_name: str) -> dict:
     if model_name == "Chronos2":
         return {"model_path": "autogluon/chronos-2"}
     if model_name in {"RecursiveTabular", "DirectTabular"}:
         return {"model_name": "GBM"}
     return {}
+
+
+def _autogluon_covariate_columns(
+    config: ExperimentConfig,
+    data: pd.DataFrame,
+) -> tuple[list[str], list[str]]:
+    known_candidates = [
+        *config.known_covariates,
+        *known_covariate_columns(config.driver_configs),
+    ]
+    known_covariates = _available_feature_columns(data, known_candidates)
+    past_candidates = [
+        *config.past_covariates,
+        *historical_covariate_columns(config.driver_configs),
+    ]
+    past_covariates = _available_feature_columns(
+        data,
+        past_candidates,
+        exclude=known_covariates,
+    )
+    return known_covariates, past_covariates
+
+
+def _time_series_input_columns(
+    data: pd.DataFrame,
+    known_covariates: list[str],
+    past_covariates: list[str],
+) -> list[str]:
+    return [
+        column
+        for column in dict.fromkeys(
+            ["item_id", "timestamp", "target", *known_covariates, *past_covariates]
+        )
+        if column in data.columns
+    ]
+
+
+def _static_features_frame(
+    data: pd.DataFrame,
+    static_features: list[str],
+) -> pd.DataFrame | None:
+    feature_columns = _available_feature_columns(
+        data,
+        static_features,
+        exclude=["item_id", "timestamp", "target"],
+    )
+    if not feature_columns:
+        return None
+    static_frame = (
+        data.sort_values(["item_id", "timestamp"])
+        .loc[:, ["item_id", *feature_columns]]
+        .dropna(subset=["item_id"])
+        .groupby("item_id", sort=False, as_index=False)
+        .first()
+        .set_index("item_id")
+    )
+    return static_frame if not static_frame.empty else None
+
+
+def _available_feature_columns(
+    data: pd.DataFrame,
+    columns: list[str],
+    *,
+    exclude: list[str] | None = None,
+) -> list[str]:
+    excluded = set(exclude or [])
+    return [
+        column
+        for column in dict.fromkeys(columns)
+        if column and column in data.columns and column not in excluded
+    ]
 
 
 def _align_known_covariates_to_future(

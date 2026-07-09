@@ -72,8 +72,9 @@ BASELINE_MODEL_NAMES = (
     "WoW",
     "MTD Daily Avg",
     "YoY Weekday WoW",
+    "YoY Weekday WoW Original",
+    "YoY Weekday WoW Hybrid",
     "YoY Weekday DoD",
-    "YWW PRO",
 )
 
 CUSTOM_MODEL_NAMES = ("AutoARIMA", "Prophet", "XGBoost")

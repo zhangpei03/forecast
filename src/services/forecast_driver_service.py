@@ -17,6 +17,7 @@ AVAILABILITY_HISTORICAL = "historical"
 FUTURE_VALUE_LAST = "last_value"
 FUTURE_VALUE_MEAN = "mean_value"
 FUTURE_VALUE_COVARIATE_STRATEGIES = {FUTURE_VALUE_LAST, FUTURE_VALUE_MEAN}
+BUILTIN_WEEKDAY_COVARIATE = "星期几"
 
 
 def normalize_driver_configs(
@@ -132,6 +133,7 @@ def build_future_known_covariates(
     freq: str,
     prediction_length: int,
 ) -> pd.DataFrame:
+    requested_columns = known_covariate_columns(configs)
     configs_by_column = {
         config.column: config
         for config in normalize_driver_configs(configs)
@@ -140,7 +142,7 @@ def build_future_known_covariates(
         and config.availability == AVAILABILITY_KNOWN_FUTURE
         and config.column
     }
-    if not configs_by_column:
+    if not requested_columns:
         return pd.DataFrame(columns=["item_id", "timestamp"])
 
     frames: list[pd.DataFrame] = []

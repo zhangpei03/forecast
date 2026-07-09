@@ -8,6 +8,7 @@ import streamlit as st
 from src.core.auth import require_user
 from src.core.config import get_settings
 from src.domain.enums import ExperimentStatus
+from src.jobs.job_control import cancel_training_job
 from src.jobs.job_runner import TooManyActiveJobsError, start_training_job
 from src.repositories.experiment_repository import ExperimentRepository
 from src.storage.file_store import get_experiment_dir, read_json
@@ -34,6 +35,8 @@ if summary is None:
 
 progress_path = get_experiment_dir(settings, current_user, experiment_id) / "progress.json"
 progress = read_json(progress_path)
+display_status = progress.get("status", summary.status.value)
+active_statuses = {ExperimentStatus.QUEUED.value, ExperimentStatus.RUNNING.value}
 
 page_header(
     summary.name,
@@ -41,7 +44,7 @@ page_header(
     badge="运行跟踪",
 )
 
-st.markdown(status_badge(progress.get("status", summary.status.value)), unsafe_allow_html=True)
+st.markdown(status_badge(display_status), unsafe_allow_html=True)
 st.progress(int(progress.get("progress", 0)), text=progress.get("message", "等待 Worker 更新状态"))
 
 steps = [
@@ -62,13 +65,45 @@ c2.metric("时间预算", f"{summary.config.get('time_limit_seconds', '—')} �
 c3.metric("预测周期", summary.config.get("prediction_length", "—"))
 c4.metric("当前 PID", progress.get("worker_pid") or "—")
 
-if progress.get("status") == ExperimentStatus.SUCCEEDED.value:
+if display_status in active_statuses:
+    if st.button("停止训练", type="secondary"):
+        result = cancel_training_job(
+            settings=settings,
+            repository=repository,
+            experiment_id=experiment_id,
+            owner_ldap=current_user,
+        )
+        if result.status_changed:
+            if result.process_terminated:
+                st.success(result.message)
+            else:
+                st.warning(result.message)
+        else:
+            st.info(result.message)
+        st.rerun()
+
+if display_status == ExperimentStatus.SUCCEEDED.value:
     st.success("评测完成。")
     if st.button("查看结果", type="primary"):
         st.query_params["experiment_id"] = experiment_id
         st.switch_page("pages/result_analysis.py")
-elif progress.get("status") == ExperimentStatus.FAILED.value:
+elif display_status == ExperimentStatus.FAILED.value:
     st.error(progress.get("message", "任务失败"))
+    st.caption(f"技术日志路径：{progress.get('log_path', '—')}")
+    if st.button("重新运行评测", type="primary"):
+        try:
+            start_training_job(
+                settings=settings,
+                repository=repository,
+                experiment_id=experiment_id,
+                owner_ldap=current_user,
+            )
+        except TooManyActiveJobsError as exc:
+            st.error(str(exc))
+        else:
+            st.rerun()
+elif display_status == ExperimentStatus.CANCELLED.value:
+    st.warning(progress.get("message", "训练已停止"))
     st.caption(f"技术日志路径：{progress.get('log_path', '—')}")
     if st.button("重新运行评测", type="primary"):
         try:

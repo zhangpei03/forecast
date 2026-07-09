@@ -7,17 +7,20 @@ import pandas as pd
 from src.core.constants import BASELINE_MODEL_NAMES, ROLLING_MEAN_WINDOW, SEASONAL_LAG
 
 YOY_WEEKDAY_WOW_MODEL = "YoY Weekday WoW"
+YOY_WEEKDAY_WOW_ORIGINAL_MODEL = "YoY Weekday WoW Original"
+YOY_WEEKDAY_WOW_HYBRID_MODEL = "YoY Weekday WoW Hybrid"
 YOY_WEEKDAY_DOD_MODEL = "YoY Weekday DoD"
-YWW_PRO_MODEL = "YWW PRO"
 BASELINE_MODELS = BASELINE_MODEL_NAMES
 
 YOY_LAG = {"M": 12, "W": 52, "D": 365}
 WOW_LAG = {"M": 1, "W": 1, "D": 7}
 YOY_RATIO_SEARCH_WEEKS = 4
-YOY_RATIO_VOLATILITY_THRESHOLD = 0.20
+YOY_WEEKDAY_ROBUST_DEVIATION_THRESHOLD = 0.25
+YOY_WEEKDAY_WOW_ORIGINAL_VOLATILITY_THRESHOLD = 0.25
+YOY_WEEKDAY_HYBRID_ORIGINAL_WEIGHTS = (0.0, 0.25, 0.5, 0.75, 1.0)
+YOY_WEEKDAY_HYBRID_VALIDATION_WINDOWS = 3
 WEATHER_COLUMN_TOKENS = ("天气", "雨雪", "weather", "rain", "snow")
 HOLIDAY_COLUMN_TOKENS = ("节假日", "假期", "holiday")
-YWW_PRO_ADJUSTMENT_SHRINK = 0.5
 
 
 def generate_baseline_backtest_predictions(
@@ -65,8 +68,9 @@ def _baseline_models_for_freq(freq: str) -> tuple[str, ...]:
             "WoW",
             "MTD Daily Avg",
             YOY_WEEKDAY_WOW_MODEL,
+            YOY_WEEKDAY_WOW_ORIGINAL_MODEL,
+            YOY_WEEKDAY_WOW_HYBRID_MODEL,
             YOY_WEEKDAY_DOD_MODEL,
-            YWW_PRO_MODEL,
         )
     return common
 
@@ -93,10 +97,12 @@ def _predict_baseline_model(
         return _predict_mtd_daily_avg(item_id, actual, train, window_index)
     if model == YOY_WEEKDAY_WOW_MODEL and freq == "D":
         return _predict_yoy_weekday_wow(item_id, actual, train, window_index)
+    if model == YOY_WEEKDAY_WOW_ORIGINAL_MODEL and freq == "D":
+        return _predict_yoy_weekday_wow_original(item_id, actual, train, window_index)
+    if model == YOY_WEEKDAY_WOW_HYBRID_MODEL and freq == "D":
+        return _predict_yoy_weekday_wow_hybrid(item_id, actual, train, window_index)
     if model == YOY_WEEKDAY_DOD_MODEL and freq == "D":
         return _predict_yoy_weekday_dod(item_id, actual, train, window_index)
-    if model == YWW_PRO_MODEL and freq == "D":
-        return _predict_yww_pro(item_id, actual, train, window_index)
     return None
 
 
@@ -153,13 +159,20 @@ def generate_baseline_future_forecast(
                 target_dates=future_dates,
                 context=context,
             )
-        elif model == YOY_WEEKDAY_DOD_MODEL:
-            forecasts = _yoy_weekday_dod_forecasts(
+        elif model == YOY_WEEKDAY_WOW_ORIGINAL_MODEL:
+            forecasts = _yoy_weekday_wow_original_forecasts(
                 history=series,
                 target_dates=future_dates,
+                context=context,
             )
-        elif model == YWW_PRO_MODEL:
-            forecasts = _yww_pro_forecasts(
+        elif model == YOY_WEEKDAY_WOW_HYBRID_MODEL:
+            forecasts = _yoy_weekday_wow_hybrid_forecasts(
+                history=series,
+                target_dates=future_dates,
+                context=context,
+            )
+        elif model == YOY_WEEKDAY_DOD_MODEL:
+            forecasts = _yoy_weekday_dod_forecasts(
                 history=series,
                 target_dates=future_dates,
                 context=context,
@@ -294,19 +307,39 @@ def _predict_yoy_weekday_wow(
     )
 
 
-def _predict_yww_pro(
+def _predict_yoy_weekday_wow_original(
     item_id: str,
     actual: pd.DataFrame,
     train: pd.DataFrame,
     window_index: int,
 ) -> pd.DataFrame:
-    forecasts = _yww_pro_forecasts(
+    forecasts = _yoy_weekday_wow_original_forecasts(
         history=train,
         target_dates=pd.DatetimeIndex(pd.to_datetime(actual["timestamp"])),
         context=pd.concat([train, actual], ignore_index=True),
     )
     return _prediction_frame(
-        YWW_PRO_MODEL,
+        YOY_WEEKDAY_WOW_ORIGINAL_MODEL,
+        item_id,
+        actual,
+        forecasts,
+        window_index,
+    )
+
+
+def _predict_yoy_weekday_wow_hybrid(
+    item_id: str,
+    actual: pd.DataFrame,
+    train: pd.DataFrame,
+    window_index: int,
+) -> pd.DataFrame:
+    forecasts = _yoy_weekday_wow_hybrid_forecasts(
+        history=train,
+        target_dates=pd.DatetimeIndex(pd.to_datetime(actual["timestamp"])),
+        context=pd.concat([train, actual], ignore_index=True),
+    )
+    return _prediction_frame(
+        YOY_WEEKDAY_WOW_HYBRID_MODEL,
         item_id,
         actual,
         forecasts,
@@ -323,6 +356,7 @@ def _predict_yoy_weekday_dod(
     forecasts = _yoy_weekday_dod_forecasts(
         history=train,
         target_dates=pd.DatetimeIndex(pd.to_datetime(actual["timestamp"])),
+        context=pd.concat([train, actual], ignore_index=True),
     )
     return _prediction_frame(
         YOY_WEEKDAY_DOD_MODEL,
@@ -331,6 +365,19 @@ def _predict_yoy_weekday_dod(
         forecasts,
         window_index,
     )
+
+
+def _lagged_forecasts(
+    history: pd.DataFrame,
+    horizon: int,
+    lag: int,
+    fallback: float,
+) -> list[float]:
+    values = list(history["target"].astype(float))
+    forecasts: list[float] = []
+    for horizon_index in range(horizon):
+        forecasts.append(_seasonal_value(values, forecasts, lag, horizon_index, fallback))
+    return forecasts
 
 
 def _yoy_weekday_wow_forecasts(
@@ -375,46 +422,13 @@ def _yoy_weekday_wow_forecasts(
     return forecasts
 
 
-def _yoy_weekday_dod_forecasts(
-    *,
-    history: pd.DataFrame,
-    target_dates: pd.DatetimeIndex,
-) -> list[float]:
-    """Roll values forward with prior-year weekday-aligned day-over-day growth."""
-    ordered = history.dropna(subset=["timestamp", "target"]).copy()
-    ordered["timestamp"] = pd.to_datetime(ordered["timestamp"]).dt.normalize()
-    ordered = ordered.sort_values("timestamp").drop_duplicates("timestamp", keep="last")
-    values = {
-        timestamp: float(target)
-        for timestamp, target in zip(ordered["timestamp"], ordered["target"], strict=False)
-    }
-    if not values:
-        return [0.0] * len(target_dates)
-
-    fallback = float(ordered["target"].iloc[-1])
-    forecasts: list[float] = []
-    for raw_timestamp in target_dates:
-        timestamp = pd.Timestamp(raw_timestamp).normalize()
-        base = values.get(timestamp - pd.Timedelta(days=1))
-        if base is None or not math.isfinite(base):
-            base = forecasts[-1] if forecasts else fallback
-        rate = _select_yoy_daily_change_rate(
-            timestamp=timestamp,
-            history_values=values,
-        )
-        forecast = float(base * (1.0 + rate))
-        values[timestamp] = forecast
-        forecasts.append(forecast)
-    return forecasts
-
-
-def _yww_pro_forecasts(
+def _yoy_weekday_wow_original_forecasts(
     *,
     history: pd.DataFrame,
     target_dates: pd.DatetimeIndex,
     context: pd.DataFrame,
 ) -> list[float]:
-    """YWW variant that projects the YoY change in weekday WoW ratios."""
+    """Original weekday-aligned YoY WoW baseline from record.py."""
     ordered = history.dropna(subset=["timestamp", "target"]).copy()
     ordered["timestamp"] = pd.to_datetime(ordered["timestamp"]).dt.normalize()
     ordered = ordered.sort_values("timestamp").drop_duplicates("timestamp", keep="last")
@@ -433,8 +447,7 @@ def _yww_pro_forecasts(
         base = values.get(timestamp - pd.Timedelta(days=7))
         if base is None or not math.isfinite(base):
             base = forecasts[-7] if len(forecasts) >= 7 else fallback
-
-        ratio = _select_yww_pro_adjusted_ratio(
+        ratio = _select_yoy_weekly_ratio_original(
             timestamp=timestamp,
             history_values=values,
             context=context_indexed,
@@ -445,199 +458,160 @@ def _yww_pro_forecasts(
     return forecasts
 
 
-def _select_yww_pro_adjusted_ratio(
+def _yoy_weekday_wow_hybrid_forecasts(
     *,
-    timestamp: pd.Timestamp,
-    history_values: dict[pd.Timestamp, float],
+    history: pd.DataFrame,
+    target_dates: pd.DatetimeIndex,
     context: pd.DataFrame,
-) -> float:
-    prior_year_ratio = _select_yww_pro_prior_ratio(
-        timestamp=timestamp,
-        history_values=history_values,
-        context=context,
-    )
-    adjustment = _select_yww_pro_yoy_adjustment(
-        timestamp=timestamp,
-        history_values=history_values,
-        context=context,
-        prior_year_ratio=prior_year_ratio,
-    )
-    ratio = prior_year_ratio + adjustment
-    return max(0.0, float(ratio)) if math.isfinite(ratio) else prior_year_ratio
-
-
-def _select_yww_pro_yoy_adjustment(
-    *,
-    timestamp: pd.Timestamp,
-    history_values: dict[pd.Timestamp, float],
-    context: pd.DataFrame,
-    prior_year_ratio: float,
-) -> float:
-    last_year_timestamp = _align_to_prior_year_weekday(timestamp)
-    last_year_actual_ratio = _weekly_ratio(history_values, last_year_timestamp)
-    if last_year_actual_ratio is None:
-        last_year_actual_ratio = prior_year_ratio
-
-    two_year_ratio = _select_yww_pro_prior_ratio(
-        timestamp=last_year_timestamp,
-        history_values=history_values,
-        context=context,
-    )
-    raw_adjustment = last_year_actual_ratio - two_year_ratio
-    if not math.isfinite(raw_adjustment):
-        return 0.0
-
-    threshold = _adaptive_yww_threshold(history_values, before=timestamp)
-    max_adjustment = abs(last_year_actual_ratio) * threshold
-    if max_adjustment == 0:
-        return 0.0
-    clipped = min(max(raw_adjustment, -max_adjustment), max_adjustment)
-    return float(clipped * YWW_PRO_ADJUSTMENT_SHRINK)
-
-
-def _select_yww_pro_prior_ratio(
-    *,
-    timestamp: pd.Timestamp,
-    history_values: dict[pd.Timestamp, float],
-    context: pd.DataFrame,
-) -> float:
-    aligned = _align_to_prior_year_weekday(timestamp)
-    threshold = _adaptive_yww_threshold(history_values, before=timestamp)
-    candidates = _yww_pro_prior_candidates(
-        aligned=aligned,
-        timestamp=timestamp,
-        history_values=history_values,
-        context=context,
-        same_month_only=True,
-        volatility_threshold=threshold,
-    )
-    if len(candidates) < 2:
-        candidates = _yww_pro_prior_candidates(
-            aligned=aligned,
-            timestamp=timestamp,
-            history_values=history_values,
-            context=context,
-            same_month_only=False,
-            volatility_threshold=threshold,
-        )
-    weighted = _weighted_median(candidates)
-    if weighted is not None:
-        return weighted
-    raw_ratio = _weekly_ratio(history_values, aligned)
-    return raw_ratio if raw_ratio is not None else 1.0
-
-
-def _yww_pro_prior_candidates(
-    *,
-    aligned: pd.Timestamp,
-    timestamp: pd.Timestamp,
-    history_values: dict[pd.Timestamp, float],
-    context: pd.DataFrame,
-    same_month_only: bool,
-    volatility_threshold: float,
-) -> list[tuple[float, float]]:
-    condition_columns = _condition_columns(context)
-    target_conditions = _condition_values(context, timestamp, condition_columns)
-    previous_conditions = _condition_values(
-        context,
-        timestamp - pd.Timedelta(days=7),
-        condition_columns,
-    )
-    surrounding_reference = _surrounding_ratio_median(
-        _ratio_candidates(
-            aligned=aligned,
-            history_values=history_values,
-            context=context,
-            condition_columns=condition_columns,
-            target_conditions=target_conditions,
-            previous_conditions=previous_conditions,
-            same_month_only=same_month_only,
-        ),
-        aligned,
-    )
-
-    weighted: list[tuple[float, float]] = []
-    for week_offset, weight in ((-2, 1.0), (-1, 2.0), (0, 4.0), (1, 2.0), (2, 1.0)):
-        candidate = aligned + pd.Timedelta(days=7 * week_offset)
-        if same_month_only and candidate.month != aligned.month:
-            continue
-        ratio = _weekly_ratio(history_values, candidate)
-        if ratio is None:
-            continue
-        if not _conditions_match(context, candidate, condition_columns, target_conditions):
-            continue
-        if not _conditions_match(
-            context,
-            candidate - pd.Timedelta(days=7),
-            condition_columns,
-            previous_conditions,
-        ):
-            continue
-        if (
-            week_offset == 0
-            and surrounding_reference not in (None, 0)
-            and abs(ratio / surrounding_reference - 1.0) > volatility_threshold
-        ):
-            continue
-        weighted.append((ratio, weight))
-    return weighted
-
-
-def _adaptive_yww_threshold(
-    history_values: dict[pd.Timestamp, float],
-    *,
-    before: pd.Timestamp,
-) -> float:
-    ratios = _historical_weekly_ratios(history_values, before=before)
-    if len(ratios) < 8:
-        return YOY_RATIO_VOLATILITY_THRESHOLD
-    median = float(pd.Series(ratios).median())
-    if median == 0:
-        return YOY_RATIO_VOLATILITY_THRESHOLD
-    ratio_series = pd.Series(ratios)
-    relative_mad = float((ratio_series - median).abs().median() / abs(median))
-    q25 = float(ratio_series.quantile(0.25))
-    q75 = float(ratio_series.quantile(0.75))
-    relative_iqr = abs(q75 - q25) / abs(median)
-    volatility = max(relative_mad, relative_iqr)
-    if volatility <= 0.12:
-        return 0.15
-    if volatility >= 0.35:
-        return 0.40
-    return 0.25
-
-
-def _historical_weekly_ratios(
-    history_values: dict[pd.Timestamp, float],
-    *,
-    before: pd.Timestamp,
 ) -> list[float]:
-    ratios: list[float] = []
-    for timestamp in sorted(history_values):
-        if timestamp >= before:
-            continue
-        ratio = _weekly_ratio(history_values, timestamp)
-        if ratio is not None:
-            ratios.append(ratio)
-    return ratios
+    ordered = history.dropna(subset=["timestamp", "target"]).copy()
+    if ordered.empty:
+        return [0.0] * len(target_dates)
+    ordered["timestamp"] = pd.to_datetime(ordered["timestamp"]).dt.normalize()
+    ordered = ordered.sort_values("timestamp").drop_duplicates("timestamp", keep="last")
 
-
-def _weighted_median(candidates: list[tuple[float, float]]) -> float | None:
-    valid = [
-        (float(value), float(weight))
-        for value, weight in candidates
-        if math.isfinite(value) and value >= 0 and math.isfinite(weight) and weight > 0
+    original_weight = _select_yoy_weekday_wow_hybrid_weight(
+        history=ordered,
+        context=context,
+        prediction_length=len(target_dates),
+    )
+    original_forecasts = _yoy_weekday_wow_original_forecasts(
+        history=ordered,
+        target_dates=target_dates,
+        context=context,
+    )
+    fallback = float(ordered["target"].iloc[-1])
+    seasonal_forecasts = _lagged_forecasts(
+        ordered,
+        len(target_dates),
+        SEASONAL_LAG["D"],
+        fallback,
+    )
+    return [
+        float(original_weight * original + (1.0 - original_weight) * seasonal)
+        for original, seasonal in zip(original_forecasts, seasonal_forecasts, strict=False)
     ]
-    if not valid:
-        return None
-    valid.sort(key=lambda item: item[0])
-    midpoint = sum(weight for _, weight in valid) / 2
-    running = 0.0
-    for value, weight in valid:
-        running += weight
-        if running >= midpoint:
-            return value
-    return valid[-1][0]
+
+
+def _select_yoy_weekday_wow_hybrid_weight(
+    *,
+    history: pd.DataFrame,
+    context: pd.DataFrame,
+    prediction_length: int,
+) -> float:
+    validation_length = min(max(1, prediction_length), 30)
+    scores = {weight: 0.0 for weight in YOY_WEEKDAY_HYBRID_ORIGINAL_WEIGHTS}
+    evaluated_windows = 0
+
+    for window_index in range(YOY_WEEKDAY_HYBRID_VALIDATION_WINDOWS):
+        validation_end = len(history) - window_index * validation_length
+        validation_start = validation_end - validation_length
+        if validation_start <= 0:
+            continue
+        train = history.iloc[:validation_start].copy()
+        actual = history.iloc[validation_start:validation_end].copy()
+        if train.empty or actual.empty:
+            continue
+
+        target_dates = pd.DatetimeIndex(pd.to_datetime(actual["timestamp"]))
+        validation_context = _validation_context_for_dates(
+            context=context,
+            train=train,
+            actual=actual,
+        )
+        original_forecasts = _yoy_weekday_wow_original_forecasts(
+            history=train,
+            target_dates=target_dates,
+            context=validation_context,
+        )
+        fallback = float(train["target"].iloc[-1])
+        seasonal_forecasts = _lagged_forecasts(
+            train,
+            len(target_dates),
+            SEASONAL_LAG["D"],
+            fallback,
+        )
+        actual_values = pd.to_numeric(actual["target"], errors="coerce").astype(float).to_list()
+        for weight in YOY_WEEKDAY_HYBRID_ORIGINAL_WEIGHTS:
+            hybrid_forecasts = [
+                float(weight * original + (1.0 - weight) * seasonal)
+                for original, seasonal in zip(
+                    original_forecasts,
+                    seasonal_forecasts,
+                    strict=False,
+                )
+            ]
+            scores[weight] += _wape(actual_values, hybrid_forecasts)
+        evaluated_windows += 1
+
+    if evaluated_windows == 0:
+        return 0.5
+    return min(
+        YOY_WEEKDAY_HYBRID_ORIGINAL_WEIGHTS,
+        key=lambda weight: (scores[weight] / evaluated_windows, abs(weight - 0.5)),
+    )
+
+
+def _validation_context_for_dates(
+    *,
+    context: pd.DataFrame,
+    train: pd.DataFrame,
+    actual: pd.DataFrame,
+) -> pd.DataFrame:
+    if context.empty:
+        return pd.concat([train, actual], ignore_index=True)
+    timestamps = pd.to_datetime(context["timestamp"]).dt.normalize()
+    max_timestamp = pd.Timestamp(actual["timestamp"].max()).normalize()
+    return context.loc[timestamps.le(max_timestamp)].copy()
+
+
+def _wape(actual_values: list[float], forecast_values: list[float]) -> float:
+    pairs = [
+        (actual, forecast)
+        for actual, forecast in zip(actual_values, forecast_values, strict=False)
+        if math.isfinite(actual) and math.isfinite(forecast)
+    ]
+    if not pairs:
+        return math.inf
+    denominator = sum(abs(actual) for actual, _ in pairs)
+    numerator = sum(abs(forecast - actual) for actual, forecast in pairs)
+    return numerator / denominator if denominator else numerator / len(pairs)
+
+
+def _yoy_weekday_dod_forecasts(
+    *,
+    history: pd.DataFrame,
+    target_dates: pd.DatetimeIndex,
+    context: pd.DataFrame,
+) -> list[float]:
+    """Roll values forward with prior-year weekday-aligned day-over-day growth."""
+    ordered = history.dropna(subset=["timestamp", "target"]).copy()
+    ordered["timestamp"] = pd.to_datetime(ordered["timestamp"]).dt.normalize()
+    ordered = ordered.sort_values("timestamp").drop_duplicates("timestamp", keep="last")
+    values = {
+        timestamp: float(target)
+        for timestamp, target in zip(ordered["timestamp"], ordered["target"], strict=False)
+    }
+    if not values:
+        return [0.0] * len(target_dates)
+
+    context_indexed = _prepare_context(context)
+    fallback = float(ordered["target"].iloc[-1])
+    forecasts: list[float] = []
+    for raw_timestamp in target_dates:
+        timestamp = pd.Timestamp(raw_timestamp).normalize()
+        base = values.get(timestamp - pd.Timedelta(days=1))
+        if base is None or not math.isfinite(base):
+            base = forecasts[-1] if forecasts else fallback
+        rate = _select_yoy_daily_change_rate(
+            timestamp=timestamp,
+            history_values=values,
+            context=context_indexed,
+        )
+        forecast = float(base * (1.0 + rate))
+        values[timestamp] = forecast
+        forecasts.append(forecast)
+    return forecasts
 
 
 def _select_yoy_weekly_ratio(
@@ -648,14 +622,27 @@ def _select_yoy_weekly_ratio(
 ) -> float:
     aligned = _align_to_prior_year_weekday(timestamp)
     raw_ratio = _weekly_ratio(history_values, aligned)
+    condition_columns = _condition_columns(context)
+    target_conditions = _condition_values(context, timestamp, condition_columns)
+    previous_conditions = _condition_values(
+        context,
+        timestamp - pd.Timedelta(days=7),
+        condition_columns,
+    )
+    raw_condition_mismatch = not _conditions_match(
+        context,
+        aligned,
+        condition_columns,
+        target_conditions,
+    )
 
     candidates = _ratio_candidates(
         aligned=aligned,
         history_values=history_values,
         context=context,
-        condition_columns=[],
-        target_conditions={},
-        previous_conditions={},
+        condition_columns=condition_columns,
+        target_conditions=target_conditions,
+        previous_conditions=previous_conditions,
         same_month_only=True,
     )
     if len(candidates) < 2:
@@ -663,9 +650,58 @@ def _select_yoy_weekly_ratio(
             aligned=aligned,
             history_values=history_values,
             context=context,
-            condition_columns=[],
-            target_conditions={},
-            previous_conditions={},
+            condition_columns=condition_columns,
+            target_conditions=target_conditions,
+            previous_conditions=previous_conditions,
+            same_month_only=False,
+        )
+    reference_ratio = _surrounding_ratio_median(candidates, aligned)
+    if raw_ratio is None:
+        return reference_ratio if reference_ratio is not None else 1.0
+    if reference_ratio is None or reference_ratio == 0:
+        return raw_ratio
+    ratio_deviation = _relative_factor_deviation(raw_ratio, reference_ratio)
+    if (
+        raw_condition_mismatch
+        or ratio_deviation > YOY_WEEKDAY_ROBUST_DEVIATION_THRESHOLD
+    ):
+        return reference_ratio
+    return raw_ratio
+
+
+def _select_yoy_weekly_ratio_original(
+    *,
+    timestamp: pd.Timestamp,
+    history_values: dict[pd.Timestamp, float],
+    context: pd.DataFrame,
+) -> float:
+    aligned = _align_to_prior_year_weekday(timestamp)
+    raw_ratio = _weekly_ratio(history_values, aligned)
+    condition_columns = _condition_columns(context)
+    target_conditions = _condition_values(context, timestamp, condition_columns)
+    previous_conditions = _condition_values(
+        context,
+        timestamp - pd.Timedelta(days=7),
+        condition_columns,
+    )
+
+    candidates = _ratio_candidates(
+        aligned=aligned,
+        history_values=history_values,
+        context=context,
+        condition_columns=condition_columns,
+        target_conditions=target_conditions,
+        previous_conditions=previous_conditions,
+        same_month_only=True,
+    )
+    if len(candidates) < 2:
+        candidates = _ratio_candidates(
+            aligned=aligned,
+            history_values=history_values,
+            context=context,
+            condition_columns=condition_columns,
+            target_conditions=target_conditions,
+            previous_conditions=previous_conditions,
             same_month_only=False,
         )
     reference_ratio = _surrounding_ratio_median(candidates, aligned)
@@ -674,7 +710,7 @@ def _select_yoy_weekly_ratio(
     if reference_ratio is None or reference_ratio == 0:
         return raw_ratio
     relative_deviation = abs(raw_ratio / reference_ratio - 1.0)
-    if relative_deviation > YOY_RATIO_VOLATILITY_THRESHOLD:
+    if relative_deviation > YOY_WEEKDAY_WOW_ORIGINAL_VOLATILITY_THRESHOLD:
         return reference_ratio
     return raw_ratio
 
@@ -683,32 +719,52 @@ def _select_yoy_daily_change_rate(
     *,
     timestamp: pd.Timestamp,
     history_values: dict[pd.Timestamp, float],
+    context: pd.DataFrame,
 ) -> float:
     aligned = _align_to_prior_year_weekday(timestamp)
     raw_rate = _daily_change_rate(history_values, aligned)
+    condition_columns = _condition_columns(context)
+    target_conditions = _condition_values(context, timestamp, condition_columns)
+    previous_conditions = _condition_values(
+        context,
+        timestamp - pd.Timedelta(days=1),
+        condition_columns,
+    )
+    raw_condition_mismatch = not _conditions_match(
+        context,
+        aligned,
+        condition_columns,
+        target_conditions,
+    )
     candidates = _daily_change_candidates(
         aligned=aligned,
         history_values=history_values,
+        context=context,
+        condition_columns=condition_columns,
+        target_conditions=target_conditions,
+        previous_conditions=previous_conditions,
         same_month_only=True,
     )
     if len(candidates) < 2:
         candidates = _daily_change_candidates(
             aligned=aligned,
             history_values=history_values,
+            context=context,
+            condition_columns=condition_columns,
+            target_conditions=target_conditions,
+            previous_conditions=previous_conditions,
             same_month_only=False,
         )
-    reference_rate = _daily_change_reference_median(candidates)
+    reference_rate = _daily_change_reference_median(candidates, aligned)
     if raw_rate is None:
         return reference_rate if reference_rate is not None else 0.0
     if reference_rate is None:
         return raw_rate
-    raw_factor = 1.0 + raw_rate
-    reference_factor = 1.0 + reference_rate
-    if reference_factor == 0:
-        relative_deviation = 0.0 if raw_factor == 0 else math.inf
-    else:
-        relative_deviation = abs(raw_factor / reference_factor - 1.0)
-    if relative_deviation > YOY_RATIO_VOLATILITY_THRESHOLD:
+    rate_deviation = _relative_factor_deviation(1.0 + raw_rate, 1.0 + reference_rate)
+    if (
+        raw_condition_mismatch
+        or rate_deviation > YOY_WEEKDAY_ROBUST_DEVIATION_THRESHOLD
+    ):
         return reference_rate
     return raw_rate
 
@@ -749,6 +805,10 @@ def _daily_change_candidates(
     *,
     aligned: pd.Timestamp,
     history_values: dict[pd.Timestamp, float],
+    context: pd.DataFrame,
+    condition_columns: list[str],
+    target_conditions: dict[str, object],
+    previous_conditions: dict[str, object],
     same_month_only: bool,
 ) -> list[tuple[pd.Timestamp, float]]:
     candidates: list[tuple[pd.Timestamp, float]] = []
@@ -759,17 +819,31 @@ def _daily_change_candidates(
         if same_month_only and candidate.month != aligned.month:
             continue
         rate = _daily_change_rate(history_values, candidate)
-        if rate is not None:
-            candidates.append((candidate, rate))
+        if rate is None:
+            continue
+        if not _conditions_match(
+            context,
+            candidate,
+            condition_columns,
+            target_conditions,
+        ):
+            continue
+        if not _conditions_match(
+            context,
+            candidate - pd.Timedelta(days=1),
+            condition_columns,
+            previous_conditions,
+        ):
+            continue
+        candidates.append((candidate, rate))
     return candidates
 
 
 def _daily_change_reference_median(
     candidates: list[tuple[pd.Timestamp, float]],
+    aligned: pd.Timestamp,
 ) -> float | None:
-    if not candidates:
-        return None
-    return float(pd.Series([rate for _, rate in candidates]).median())
+    return _surrounding_value_median(candidates, aligned)
 
 
 def _ratio_candidates(
@@ -814,6 +888,13 @@ def _surrounding_ratio_median(
     candidates: list[tuple[pd.Timestamp, float]],
     aligned: pd.Timestamp,
 ) -> float | None:
+    return _surrounding_value_median(candidates, aligned)
+
+
+def _surrounding_value_median(
+    candidates: list[tuple[pd.Timestamp, float]],
+    aligned: pd.Timestamp,
+) -> float | None:
     before = sorted(
         (candidate for candidate in candidates if candidate[0] < aligned),
         key=lambda candidate: candidate[0],
@@ -832,6 +913,13 @@ def _surrounding_ratio_median(
     if not surrounding:
         return None
     return float(pd.Series([ratio for _, ratio in surrounding]).median())
+
+
+def _relative_factor_deviation(raw_factor: float, reference_factor: float) -> float:
+    if reference_factor == 0:
+        return 0.0 if raw_factor == 0 else math.inf
+    deviation = abs(raw_factor / reference_factor - 1.0)
+    return deviation if math.isfinite(deviation) else math.inf
 
 
 def _prepare_context(context: pd.DataFrame) -> pd.DataFrame:

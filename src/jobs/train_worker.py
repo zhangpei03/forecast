@@ -72,6 +72,25 @@ from src.storage.file_store import get_experiment_dir, read_json, write_json
 from src.storage.parquet import read_parquet, write_parquet
 
 
+def _selected_model_groups(config: ExperimentConfig) -> dict[str, list[str]]:
+    groups: dict[str, list[str]] = {}
+    for entry in config.selected_models or []:
+        if not isinstance(entry, dict):
+            continue
+        family = str(entry.get("family") or "").strip()
+        name = str(entry.get("name") or "").strip()
+        if family and name:
+            groups.setdefault(family, []).append(name)
+    if groups:
+        return groups
+
+    legacy_family = config.selected_model_family or MODEL_FAMILY_ALL
+    legacy_name = (config.selected_model_name or "").strip()
+    if legacy_family != MODEL_FAMILY_ALL and legacy_name:
+        groups.setdefault(legacy_family, []).append(legacy_name)
+    return groups
+
+
 def main() -> None:
     args = _parse_args()
     settings = AppSettings(
@@ -115,29 +134,33 @@ def main() -> None:
             raise ForecastLabError("实验不存在或已被删除")
         config = ExperimentConfig(**summary.config)
         driver_configs = normalize_driver_configs(config.driver_configs)
-        selected_family = config.selected_model_family or MODEL_FAMILY_ALL
-        selected_model = config.selected_model_name
+        selected_groups = _selected_model_groups(config)
         normalized_data = read_parquet(experiment_dir / "normalized_data.parquet")
         if normalized_data.empty:
             raise ForecastLabError("标准化数据不存在，请重新上传并保存实验")
 
         progress(WorkerStage.BUILD_BACKTEST_WINDOWS, 15, "正在构建时间顺序滚动回测窗口")
-        run_all_models = selected_family == MODEL_FAMILY_ALL
+        run_all_models = not selected_groups and (
+            config.selected_model_family or MODEL_FAMILY_ALL
+        ) == MODEL_FAMILY_ALL
+        baseline_models = selected_groups.get(MODEL_FAMILY_BASELINE, [])
+        custom_models = selected_groups.get(MODEL_FAMILY_CUSTOM, [])
+        autogluon_models = selected_groups.get(MODEL_FAMILY_AUTOGLUON, [])
         all_predictions: list[pd.DataFrame] = []
 
-        if run_all_models or selected_family == MODEL_FAMILY_BASELINE:
+        if run_all_models or baseline_models:
             progress(WorkerStage.TRAIN_BASELINES, 28, "正在训练并评估业务基线")
             baseline_predictions = generate_baseline_backtest_predictions(
                 data=normalized_data,
                 freq=config.freq,
                 prediction_length=config.prediction_length,
                 num_windows=config.num_val_windows,
-                models=None if run_all_models else [selected_model],
+                models=None if run_all_models else baseline_models,
             )
             if not baseline_predictions.empty:
                 all_predictions.append(baseline_predictions)
 
-        if run_all_models or selected_family == MODEL_FAMILY_CUSTOM:
+        if run_all_models or custom_models:
             progress(WorkerStage.TRAIN_BASELINES, 34, "正在训练并评估外部模型")
             custom_predictions, custom_failures = generate_custom_model_backtest_predictions(
                 data=normalized_data,
@@ -145,21 +168,21 @@ def main() -> None:
                 prediction_length=config.prediction_length,
                 num_windows=config.num_val_windows,
                 driver_configs=driver_configs,
-                models=None if run_all_models else [selected_model],
+                models=None if run_all_models else custom_models,
             )
             if not custom_predictions.empty:
                 all_predictions.append(custom_predictions)
             for failure in custom_failures:
                 logger.warning("Custom model %s failed: %s", failure.model, failure.message)
 
-        if run_all_models or selected_family == MODEL_FAMILY_AUTOGLUON:
+        if run_all_models or autogluon_models:
             progress(WorkerStage.TRAIN_AUTOGLUON, 42, "正在训练 AutoGluon 候选模型")
             try:
                 autogluon_predictions = generate_autogluon_backtest_predictions(
                     data=normalized_data,
                     config=config,
                     model_dir=experiment_dir / "models",
-                    selected_model=None if run_all_models else selected_model,
+                    selected_models=None if run_all_models else autogluon_models,
                 )
                 if not autogluon_predictions.empty:
                     all_predictions.append(autogluon_predictions)
@@ -248,7 +271,7 @@ def main() -> None:
                     model_dir=experiment_dir / "models",
                     model_name=str(best_model["model"]),
                     selected_model=(
-                        selected_model if selected_family == MODEL_FAMILY_AUTOGLUON else None
+                        None if str(best_model["model"]) == "AutoGluon" else str(best_model["model"])
                     ),
                 )
             except AutoGluonUnavailableError:

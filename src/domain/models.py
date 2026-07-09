@@ -42,6 +42,7 @@ class ExperimentConfig:
     past_covariates: list[str] = field(default_factory=list)
     static_features: list[str] = field(default_factory=list)
     driver_configs: list[ForecastDriverConfig | dict[str, Any]] = field(default_factory=list)
+    selected_models: list[dict[str, str]] = field(default_factory=list)
     selected_model_family: str = "all"
     selected_model_name: str = "全部模型"
     freq: str = "M"

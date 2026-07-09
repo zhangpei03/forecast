@@ -33,6 +33,7 @@ from src.services.excel_service import (
 from src.services.forecast_driver_service import (
     AVAILABILITY_HISTORICAL,
     AVAILABILITY_KNOWN_FUTURE,
+    BUILTIN_WEEKDAY_COVARIATE,
     CONFIG_TYPE_CALENDAR_FACTOR,
     CONFIG_TYPE_COVARIATE,
     CONFIG_TYPE_GROWTH_RATE,
@@ -75,13 +76,34 @@ def _model_options(freq: str) -> dict[str, tuple[str, str]]:
     return options
 
 
+def _selected_model_entries(
+    selected_labels: list[str],
+    model_options: dict[str, tuple[str, str]],
+) -> list[dict[str, str]]:
+    return [
+        {
+            "label": label,
+            "family": model_options[label][0],
+            "name": model_options[label][1],
+        }
+        for label in selected_labels
+        if label in model_options
+    ]
+
+
+def _selected_model_summary(selected_labels: list[str]) -> str:
+    if not selected_labels:
+        return "未选择"
+    return "、".join(selected_labels)
+
+
 _HISTORICAL_DEFAULT_DRIVER_COLUMNS = {
     "竞争成交率",
     "客观成交率",
     "日均非预约tsh",
     "c补率",
 }
-_EXCLUDED_DRIVER_COLUMNS = {"星期几"}
+_EXCLUDED_DRIVER_COLUMNS: set[str] = set()
 
 
 def _driver_column_key(column: str) -> str:
@@ -100,6 +122,11 @@ def _default_availability_for_driver(column: str) -> str:
 
 def _driver_candidate_columns(columns: list[str]) -> list[str]:
     return [column for column in columns if not _is_excluded_driver_column(column)]
+
+
+def _default_covariate_candidates(columns: list[str]) -> list[str]:
+    weekday_key = _driver_column_key(BUILTIN_WEEKDAY_COVARIATE)
+    return [column for column in columns if _driver_column_key(column) == weekday_key]
 
 
 def _availability_label(availability: str) -> str:
@@ -185,6 +212,7 @@ if step == "2 字段与质量":
         covariate_candidates = st.multiselect(
             "影响因子与协变量候选字段",
             candidate_columns,
+            default=_default_covariate_candidates(candidate_columns),
             help="仅保留数值字段。具体类型与未来值规则将在预测配置步骤维护。",
         )
         static_features = st.multiselect(
@@ -296,8 +324,14 @@ if step == "3 预测配置":
     with c3:
         st.markdown("#### 训练模式")
         model_options = _model_options(profile.frequency)
-        selected_model_label = st.selectbox("预测方法/模型", list(model_options), index=0)
-        selected_model_family, selected_model_name = model_options[selected_model_label]
+        selected_model_labels = st.multiselect(
+            "预测方法/模型",
+            list(model_options),
+            default=[next(iter(model_options))],
+        )
+        selected_models = _selected_model_entries(selected_model_labels, model_options)
+        if not selected_models:
+            st.warning("请至少选择一个预测方法/模型。")
         mode = st.selectbox("模式", list(TRAINING_PRESETS), index=1)
         preset_config = TRAINING_PRESETS[mode]
         time_limit = st.number_input(
@@ -329,7 +363,8 @@ if step == "3 预测配置":
                         strategy_label = "历史均值" if driver.get("future_value_strategy") == FUTURE_VALUE_MEAN else "历史末值"
                         coeff = driver.get("future_value_coeff") or 0
                         coeff_str = f" × {1 + coeff:.0%}" if coeff else ""
-                        st.markdown(f"**{driver['name']}**  ·  `{driver['column']}`  ·  {avail_label}  ·  {strategy_label}{coeff_str}")
+                        rule_label = f"{strategy_label}{coeff_str}"
+                        st.markdown(f"**{driver['name']}**  ·  `{driver['column']}`  ·  {avail_label}  ·  {rule_label}")
                     elif driver["config_type"] == CONFIG_TYPE_GROWTH_RATE:
                         st.markdown(f"**{driver['name']}**  ·  每期 {float(driver['growth_rate']) * 100:.2f}%")
                     elif driver["config_type"] == CONFIG_TYPE_CALENDAR_FACTOR:
@@ -699,9 +734,16 @@ if step == "3 预测配置":
         "time_limit_seconds": int(time_limit),
         "metric": metric,
         "mode": mode,
-        "selected_model_label": selected_model_label,
-        "selected_model_family": selected_model_family,
-        "selected_model_name": selected_model_name,
+        "selected_model_label": _selected_model_summary(selected_model_labels),
+        "selected_models": selected_models,
+        "selected_model_family": (
+            selected_models[0]["family"] if len(selected_models) == 1 else "mixed"
+        ),
+        "selected_model_name": (
+            selected_models[0]["name"]
+            if len(selected_models) == 1
+            else _selected_model_summary(selected_model_labels)
+        ),
         "driver_configs": list(st.session_state.driver_configs),
     }
 
@@ -755,7 +797,13 @@ if step == "4 确认运行":
     if driver_errors:
         for error in driver_errors:
             st.error(error)
-    can_run = profile.blocking_issue_count == 0 and not driver_errors
+    if not config_view.get("selected_models"):
+        st.error("请至少选择一个预测方法/模型。")
+    can_run = (
+        profile.blocking_issue_count == 0
+        and not driver_errors
+        and bool(config_view.get("selected_models"))
+    )
     if not can_run:
         st.error("仍存在阻断问题，请返回字段与质量步骤处理后再运行。")
     if st.button("开始评测", type="primary", disabled=not can_run):
@@ -776,6 +824,7 @@ if step == "4 确认运行":
             past_covariates=historical_covariates,
             static_features=mapping["static_features"],
             driver_configs=driver_configs,
+            selected_models=runtime.get("selected_models", []),
             selected_model_family=runtime.get("selected_model_family", "all"),
             selected_model_name=runtime.get("selected_model_name", "全部模型"),
             freq=profile.frequency,

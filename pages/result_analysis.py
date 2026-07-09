@@ -35,6 +35,19 @@ def _percent(value) -> str:
     return "—" if value is None or pd.isna(value) else f"{float(value) * 100:.1f}%"
 
 
+def _selected_models_text(config: dict) -> str:
+    selected_models = config.get("selected_models") or []
+    if selected_models:
+        labels = [
+            str(model.get("label") or model.get("name"))
+            for model in selected_models
+            if isinstance(model, dict) and (model.get("label") or model.get("name"))
+        ]
+        if labels:
+            return "、".join(labels)
+    return config.get("selected_model_name", "全部模型")
+
+
 def _finance_detail(data: pd.DataFrame) -> pd.DataFrame:
     columns = {
         "timestamp": "期间",
@@ -265,7 +278,7 @@ with tabs[4]:
             {
                 "预测周期": summary.config.get("prediction_length"),
                 "回测窗口": summary.config.get("num_val_windows"),
-                "预测模型": summary.config.get("selected_model_name", "全部模型"),
+                "预测模型": _selected_models_text(summary.config),
                 "训练模式": summary.config.get("preset"),
                 "时间预算": summary.config.get("time_limit_seconds"),
             },

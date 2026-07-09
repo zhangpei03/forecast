@@ -8,6 +8,7 @@ __pycache__/
 runtime/
 *.log
 outputs/
+*.egg-info/
 
 # 非本项目产物(其它任务临时文件)
 .fpa_work/

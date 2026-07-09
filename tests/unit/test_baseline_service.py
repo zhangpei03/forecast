@@ -2,11 +2,12 @@ import pandas as pd
 import pytest
 
 from src.services.baseline_service import (
-    YWW_PRO_MODEL,
     YOY_WEEKDAY_DOD_MODEL,
+    YOY_WEEKDAY_WOW_HYBRID_MODEL,
+    YOY_WEEKDAY_WOW_ORIGINAL_MODEL,
     YOY_WEEKDAY_WOW_MODEL,
     _align_to_prior_year_weekday,
-    _adaptive_yww_threshold,
+    _select_yoy_weekday_wow_hybrid_weight,
     generate_baseline_backtest_predictions,
     generate_baseline_future_forecast,
 )
@@ -90,6 +91,8 @@ def test_daily_baseline_includes_yoy_wow_mtd() -> None:
     assert "YoY" in models
     assert "WoW" in models
     assert "MTD Daily Avg" in models
+    assert YOY_WEEKDAY_WOW_ORIGINAL_MODEL in models
+    assert YOY_WEEKDAY_WOW_HYBRID_MODEL in models
     assert YOY_WEEKDAY_DOD_MODEL in models
 
     # WoW: lag=7, so first forecast = train[-7]
@@ -209,10 +212,10 @@ def test_yoy_weekday_wow_rolls_forecast_into_following_week() -> None:
     assert future.iloc[7]["forecast_p50"] == pytest.approx(242.0)
 
 
-def test_yoy_weekday_wow_keeps_raw_ratio_within_20_percent_deviation() -> None:
+def test_yoy_weekday_wow_replaces_volatile_ratio_even_when_conditions_match() -> None:
     history_dates = pd.date_range("2025-06-01", "2026-07-15", freq="D")
     targets = pd.Series(100.0, index=history_dates)
-    targets.loc[pd.Timestamp("2025-07-17")] = 119.0
+    targets.loc[pd.Timestamp("2025-07-17")] = 200.0
     targets.loc[pd.Timestamp("2026-07-09")] = 200.0
     history = pd.DataFrame(
         {
@@ -229,7 +232,89 @@ def test_yoy_weekday_wow_keeps_raw_ratio_within_20_percent_deviation() -> None:
         model=YOY_WEEKDAY_WOW_MODEL,
     )
 
-    assert future["forecast_p50"].tolist() == pytest.approx([238.0])
+    assert future["forecast_p50"].tolist() == pytest.approx([200.0])
+
+
+def test_yoy_weekday_wow_original_uses_record_py_volatility_rule() -> None:
+    history_dates = pd.date_range("2025-06-01", "2026-07-01", freq="D")
+    targets = pd.Series(100.0, index=history_dates)
+    weather = pd.Series(0, index=history_dates, dtype=int)
+
+    targets.loc[pd.Timestamp("2025-06-26")] = 100.0
+    targets.loc[pd.Timestamp("2025-07-03")] = 200.0
+    for date in (pd.Timestamp("2025-06-19"), pd.Timestamp("2025-07-17")):
+        targets.loc[date - pd.Timedelta(days=7)] = 100.0
+        targets.loc[date] = 110.0
+        weather.loc[date - pd.Timedelta(days=7)] = 1
+        weather.loc[date] = 1
+    targets.loc[pd.Timestamp("2026-06-25")] = 300.0
+    weather.loc[pd.Timestamp("2026-06-25")] = 1
+
+    history = pd.DataFrame(
+        {
+            "item_id": "A",
+            "timestamp": history_dates,
+            "target": targets.to_numpy(),
+            "是否雨雪天气": weather.to_numpy(),
+        }
+    )
+    data = history.copy()
+    data.loc[len(data)] = {
+        "item_id": "A",
+        "timestamp": pd.Timestamp("2026-07-02"),
+        "target": float("nan"),
+        "是否雨雪天气": 1,
+    }
+
+    future = generate_baseline_future_forecast(
+        data=data,
+        freq="D",
+        prediction_length=1,
+        model=YOY_WEEKDAY_WOW_ORIGINAL_MODEL,
+    )
+
+    assert future["forecast_p50"].tolist() == pytest.approx([330.0])
+
+
+def test_yoy_weekday_wow_original_does_not_replace_on_condition_mismatch_only() -> None:
+    history_dates = pd.date_range("2025-06-01", "2026-07-01", freq="D")
+    targets = pd.Series(100.0, index=history_dates)
+    weather = pd.Series(0, index=history_dates, dtype=int)
+
+    targets.loc[pd.Timestamp("2025-06-26")] = 100.0
+    targets.loc[pd.Timestamp("2025-07-03")] = 120.0
+    for date in (pd.Timestamp("2025-06-19"), pd.Timestamp("2025-07-17")):
+        targets.loc[date - pd.Timedelta(days=7)] = 100.0
+        targets.loc[date] = 110.0
+        weather.loc[date - pd.Timedelta(days=7)] = 1
+        weather.loc[date] = 1
+    targets.loc[pd.Timestamp("2026-06-25")] = 300.0
+    weather.loc[pd.Timestamp("2026-06-25")] = 1
+
+    history = pd.DataFrame(
+        {
+            "item_id": "A",
+            "timestamp": history_dates,
+            "target": targets.to_numpy(),
+            "是否雨雪天气": weather.to_numpy(),
+        }
+    )
+    data = history.copy()
+    data.loc[len(data)] = {
+        "item_id": "A",
+        "timestamp": pd.Timestamp("2026-07-02"),
+        "target": float("nan"),
+        "是否雨雪天气": 1,
+    }
+
+    future = generate_baseline_future_forecast(
+        data=data,
+        freq="D",
+        prediction_length=1,
+        model=YOY_WEEKDAY_WOW_ORIGINAL_MODEL,
+    )
+
+    assert future["forecast_p50"].tolist() == pytest.approx([360.0])
 
 
 def test_yoy_weekday_dod_applies_prior_year_daily_change() -> None:
@@ -281,16 +366,16 @@ def test_yoy_weekday_dod_rolls_forecast_into_next_day() -> None:
     assert future["forecast_p50"].tolist() == pytest.approx([220.0, 242.0])
 
 
-def test_yoy_weekday_dod_uses_surrounding_same_weekday_daily_change_when_volatile() -> None:
+def test_yoy_weekday_dod_replaces_volatile_daily_change_even_when_conditions_match() -> None:
     history_dates = pd.date_range("2025-06-01", "2026-07-01", freq="D")
     targets = pd.Series(100.0, index=history_dates)
     targets.loc[pd.Timestamp("2025-07-02")] = 100.0
     targets.loc[pd.Timestamp("2025-07-03")] = 200.0
     for date in (
+        pd.Timestamp("2025-06-19"),
+        pd.Timestamp("2025-06-26"),
         pd.Timestamp("2025-07-10"),
         pd.Timestamp("2025-07-17"),
-        pd.Timestamp("2025-07-24"),
-        pd.Timestamp("2025-07-31"),
     ):
         targets.loc[date - pd.Timedelta(days=1)] = 100.0
         targets.loc[date] = 110.0
@@ -313,23 +398,19 @@ def test_yoy_weekday_dod_uses_surrounding_same_weekday_daily_change_when_volatil
     assert future["forecast_p50"].tolist() == pytest.approx([330.0])
 
 
-def test_yww_pro_adjusts_prior_year_ratio_with_two_year_signal() -> None:
-    dates = pd.date_range("2024-06-01", "2026-07-01", freq="D")
-    targets = pd.Series(100.0, index=dates)
+def test_yoy_weekday_wow_hybrid_selects_seasonal_naive_when_weekly_pattern_wins() -> None:
+    dates = pd.date_range("2025-01-01", "2026-07-01", freq="D")
+    weekly_pattern = [10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0]
+    targets = pd.Series(
+        [weekly_pattern[index % 7] for index in range(len(dates))],
+        index=dates,
+    )
 
-    # Two-year Thursday ratios around the prior-year anchor are all 1.1.
-    targets.loc[pd.Timestamp("2024-06-27")] = 100.0
-    targets.loc[pd.Timestamp("2024-07-04")] = 110.0
-    targets.loc[pd.Timestamp("2024-07-11")] = 121.0
-    targets.loc[pd.Timestamp("2024-07-18")] = 133.1
+    for target_date in pd.date_range("2026-06-25", "2026-07-02", freq="D"):
+        aligned = _align_to_prior_year_weekday(target_date)
+        targets.loc[aligned - pd.Timedelta(days=7)] = 100.0
+        targets.loc[aligned] = 200.0
 
-    # Prior-year Thursday ratios around the target anchor are all 1.2.
-    targets.loc[pd.Timestamp("2025-06-26")] = 144.0
-    targets.loc[pd.Timestamp("2025-07-03")] = 172.8
-    targets.loc[pd.Timestamp("2025-07-10")] = 207.36
-    targets.loc[pd.Timestamp("2025-07-17")] = 248.832
-
-    targets.loc[pd.Timestamp("2026-06-25")] = 200.0
     history = pd.DataFrame(
         {
             "item_id": "A",
@@ -342,26 +423,64 @@ def test_yww_pro_adjusts_prior_year_ratio_with_two_year_signal() -> None:
         data=history,
         freq="D",
         prediction_length=1,
-        model=YWW_PRO_MODEL,
+        model=YOY_WEEKDAY_WOW_HYBRID_MODEL,
+    )
+    selected_weight = _select_yoy_weekday_wow_hybrid_weight(
+        history=history,
+        context=history,
+        prediction_length=1,
     )
 
-    expected_ratio = 1.2 + (1.2 - 1.1) * 0.5
-    assert future["forecast_p50"].tolist() == pytest.approx([200.0 * expected_ratio])
+    assert selected_weight == 0.0
+    assert future["forecast_p50"].tolist() == pytest.approx([weekly_pattern[len(dates) % 7]])
 
 
-def test_adaptive_yww_threshold_uses_series_volatility() -> None:
-    stable_dates = pd.date_range("2026-01-01", periods=80, freq="D")
-    stable_values = {date: 100.0 for date in stable_dates}
-    volatile_values = {
-        date: 100.0 * (1.0 + (0.5 if index % 14 < 7 else -0.2))
-        for index, date in enumerate(stable_dates)
-    }
+def test_yoy_weekday_wow_hybrid_selects_original_when_yoy_pattern_wins() -> None:
+    dates = pd.date_range("2025-01-01", "2026-07-01", freq="D")
+    targets = pd.Series(100.0, index=dates)
 
-    assert _adaptive_yww_threshold(stable_values, before=stable_dates[-1]) == 0.15
-    assert _adaptive_yww_threshold(volatile_values, before=stable_dates[-1]) == 0.40
+    for start in pd.date_range("2025-05-01", "2025-05-07", freq="D"):
+        for week_index in range(16):
+            date = start + pd.Timedelta(days=7 * week_index)
+            if date in targets.index:
+                targets.loc[date] = 100.0 * (2.0**week_index)
+    for start in pd.date_range("2026-06-16", "2026-06-22", freq="D"):
+        for week_index in range(3):
+            date = start + pd.Timedelta(days=7 * week_index)
+            if date in targets.index:
+                targets.loc[date] = 100.0 * (2.0**week_index)
+
+    history = pd.DataFrame(
+        {
+            "item_id": "A",
+            "timestamp": dates,
+            "target": targets.to_numpy(),
+        }
+    )
+
+    hybrid = generate_baseline_future_forecast(
+        data=history,
+        freq="D",
+        prediction_length=3,
+        model=YOY_WEEKDAY_WOW_HYBRID_MODEL,
+    ).sort_values("timestamp")
+    original = generate_baseline_future_forecast(
+        data=history,
+        freq="D",
+        prediction_length=3,
+        model=YOY_WEEKDAY_WOW_ORIGINAL_MODEL,
+    ).sort_values("timestamp")
+    selected_weight = _select_yoy_weekday_wow_hybrid_weight(
+        history=history,
+        context=history,
+        prediction_length=3,
+    )
+
+    assert selected_weight == 1.0
+    assert hybrid["forecast_p50"].tolist() == pytest.approx(original["forecast_p50"].tolist())
 
 
-def test_yoy_weekday_wow_ignores_weather_when_raw_ratio_is_volatile() -> None:
+def test_yoy_weekday_wow_uses_matching_weather_when_prior_year_conditions_mismatch() -> None:
     history_dates = pd.date_range("2025-06-01", "2026-07-01", freq="D")
     targets = pd.Series(100.0, index=history_dates)
     weather = pd.Series(0, index=history_dates, dtype=int)
@@ -401,4 +520,43 @@ def test_yoy_weekday_wow_ignores_weather_when_raw_ratio_is_volatile() -> None:
         model=YOY_WEEKDAY_WOW_MODEL,
     )
 
-    assert future["forecast_p50"].tolist() == pytest.approx([240.0])
+    assert future["forecast_p50"].tolist() == pytest.approx([330.0])
+
+
+def test_yoy_weekday_dod_uses_matching_weather_when_prior_year_conditions_mismatch() -> None:
+    history_dates = pd.date_range("2025-06-01", "2026-07-01", freq="D")
+    targets = pd.Series(100.0, index=history_dates)
+    weather = pd.Series(0, index=history_dates, dtype=int)
+
+    targets.loc[pd.Timestamp("2025-07-02")] = 100.0
+    targets.loc[pd.Timestamp("2025-07-03")] = 200.0
+    for date in (pd.Timestamp("2025-06-19"), pd.Timestamp("2025-07-17")):
+        targets.loc[date - pd.Timedelta(days=1)] = 100.0
+        targets.loc[date] = 110.0
+        weather.loc[date] = 1
+    targets.loc[pd.Timestamp("2026-07-01")] = 300.0
+
+    history = pd.DataFrame(
+        {
+            "item_id": "A",
+            "timestamp": history_dates,
+            "target": targets.to_numpy(),
+            "是否雨雪天气": weather.to_numpy(),
+        }
+    )
+    data = history.copy()
+    data.loc[len(data)] = {
+        "item_id": "A",
+        "timestamp": pd.Timestamp("2026-07-02"),
+        "target": float("nan"),
+        "是否雨雪天气": 1,
+    }
+
+    future = generate_baseline_future_forecast(
+        data=data,
+        freq="D",
+        prediction_length=1,
+        model=YOY_WEEKDAY_DOD_MODEL,
+    )
+
+    assert future["forecast_p50"].tolist() == pytest.approx([330.0])

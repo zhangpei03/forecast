@@ -3,12 +3,55 @@ import pytest
 
 from src.domain.models import ForecastDriverConfig
 from src.services.forecast_driver_service import (
+    BUILTIN_WEEKDAY_COVARIATE,
     apply_forecast_driver_adjustments,
     apply_growth_rate_adjustments,
     build_future_driver_assumptions,
     build_future_known_covariates,
+    known_covariate_columns,
     validate_driver_configs,
 )
+
+
+def test_known_covariates_include_configured_weekday_column() -> None:
+    drivers = [
+        ForecastDriverConfig(
+            name=BUILTIN_WEEKDAY_COVARIATE,
+            config_type="covariate",
+            column=BUILTIN_WEEKDAY_COVARIATE,
+            availability="known_future",
+            future_value_strategy="last_value",
+        )
+    ]
+
+    assert known_covariate_columns(drivers) == [BUILTIN_WEEKDAY_COVARIATE]
+
+
+def test_build_future_known_covariates_uses_prefilled_weekday_values() -> None:
+    data = pd.DataFrame(
+        {
+            "item_id": ["A", "A", "A", "A"],
+            "timestamp": pd.to_datetime(
+                ["2024-07-08", "2024-07-09", "2024-07-10", "2024-07-11"]
+            ),
+            "target": [100.0, 110.0, float("nan"), float("nan")],
+            BUILTIN_WEEKDAY_COVARIATE: [1.0, 2.0, 3.0, 4.0],
+        }
+    )
+    drivers = [
+        ForecastDriverConfig(
+            name=BUILTIN_WEEKDAY_COVARIATE,
+            config_type="covariate",
+            column=BUILTIN_WEEKDAY_COVARIATE,
+            availability="known_future",
+            future_value_strategy="last_value",
+        )
+    ]
+
+    future = build_future_known_covariates(data, drivers, freq="D", prediction_length=2)
+
+    assert future["timestamp"].tolist() == list(pd.date_range("2024-07-10", periods=2, freq="D"))
+    assert future[BUILTIN_WEEKDAY_COVARIATE].tolist() == pytest.approx([3.0, 4.0])
 
 
 def test_build_future_known_covariates_uses_each_series_last_value() -> None:
