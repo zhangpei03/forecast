@@ -4,11 +4,14 @@ import math
 
 import pandas as pd
 
-from src.core.constants import BASELINE_MODEL_NAMES, ROLLING_MEAN_WINDOW, SEASONAL_LAG
+from src.core.constants import (
+    BASELINE_MODEL_NAMES,
+    PREDICTION_PROVENANCE_COLUMNS,
+    ROLLING_MEAN_WINDOW,
+    SEASONAL_LAG,
+)
 
 YOY_WEEKDAY_WOW_MODEL = "YoY Weekday WoW"
-YOY_WEEKDAY_WOW_ORIGINAL_MODEL = "YoY Weekday WoW Original"
-YOY_WEEKDAY_WOW_HYBRID_MODEL = "YoY Weekday WoW Hybrid"
 YOY_WEEKDAY_DOD_MODEL = "YoY Weekday DoD"
 BASELINE_MODELS = BASELINE_MODEL_NAMES
 
@@ -17,8 +20,6 @@ WOW_LAG = {"M": 1, "W": 1, "D": 7}
 YOY_RATIO_SEARCH_WEEKS = 4
 YOY_WEEKDAY_ROBUST_DEVIATION_THRESHOLD = 0.25
 YOY_WEEKDAY_WOW_ORIGINAL_VOLATILITY_THRESHOLD = 0.25
-YOY_WEEKDAY_HYBRID_ORIGINAL_WEIGHTS = (0.0, 0.25, 0.5, 0.75, 1.0)
-YOY_WEEKDAY_HYBRID_VALIDATION_WINDOWS = 3
 WEATHER_COLUMN_TOKENS = ("天气", "雨雪", "weather", "rain", "snow")
 HOLIDAY_COLUMN_TOKENS = ("节假日", "假期", "holiday")
 
@@ -68,8 +69,6 @@ def _baseline_models_for_freq(freq: str) -> tuple[str, ...]:
             "WoW",
             "MTD Daily Avg",
             YOY_WEEKDAY_WOW_MODEL,
-            YOY_WEEKDAY_WOW_ORIGINAL_MODEL,
-            YOY_WEEKDAY_WOW_HYBRID_MODEL,
             YOY_WEEKDAY_DOD_MODEL,
         )
     return common
@@ -96,11 +95,7 @@ def _predict_baseline_model(
     if model == "MTD Daily Avg" and freq == "D":
         return _predict_mtd_daily_avg(item_id, actual, train, window_index)
     if model == YOY_WEEKDAY_WOW_MODEL and freq == "D":
-        return _predict_yoy_weekday_wow(item_id, actual, train, window_index)
-    if model == YOY_WEEKDAY_WOW_ORIGINAL_MODEL and freq == "D":
         return _predict_yoy_weekday_wow_original(item_id, actual, train, window_index)
-    if model == YOY_WEEKDAY_WOW_HYBRID_MODEL and freq == "D":
-        return _predict_yoy_weekday_wow_hybrid(item_id, actual, train, window_index)
     if model == YOY_WEEKDAY_DOD_MODEL and freq == "D":
         return _predict_yoy_weekday_dod(item_id, actual, train, window_index)
     return None
@@ -128,6 +123,7 @@ def generate_baseline_future_forecast(
             freq=pandas_freq,
         )[1:]
         actual = pd.DataFrame({"timestamp": future_dates, "target": [pd.NA] * prediction_length})
+        provenance: list[dict[str, object]] | None = None
         if model == "Last Value":
             forecasts = [float(series["target"].iloc[-1])] * prediction_length
         elif model == "Seasonal Naive":
@@ -154,25 +150,13 @@ def generate_baseline_future_forecast(
         elif model == "MTD Daily Avg":
             forecasts = _mtd_forecasts(series, future_dates)
         elif model == YOY_WEEKDAY_WOW_MODEL:
-            forecasts = _yoy_weekday_wow_forecasts(
-                history=series,
-                target_dates=future_dates,
-                context=context,
-            )
-        elif model == YOY_WEEKDAY_WOW_ORIGINAL_MODEL:
-            forecasts = _yoy_weekday_wow_original_forecasts(
-                history=series,
-                target_dates=future_dates,
-                context=context,
-            )
-        elif model == YOY_WEEKDAY_WOW_HYBRID_MODEL:
-            forecasts = _yoy_weekday_wow_hybrid_forecasts(
+            forecasts, provenance = _yoy_weekday_wow_original_forecasts(
                 history=series,
                 target_dates=future_dates,
                 context=context,
             )
         elif model == YOY_WEEKDAY_DOD_MODEL:
-            forecasts = _yoy_weekday_dod_forecasts(
+            forecasts, provenance = _yoy_weekday_dod_forecasts(
                 history=series,
                 target_dates=future_dates,
                 context=context,
@@ -180,7 +164,8 @@ def generate_baseline_future_forecast(
         else:
             window = ROLLING_MEAN_WINDOW[freq]
             forecasts = [float(series["target"].tail(window).mean())] * prediction_length
-        frame = _prediction_frame(model, item_id, actual, forecasts, -1)
+            provenance = None
+        frame = _prediction_frame(model, item_id, actual, forecasts, -1, provenance=provenance)
         frame["window_id"] = "FUTURE"
         frame["actual"] = pd.NA
         frame["error"] = pd.NA
@@ -287,13 +272,13 @@ def _predict_mtd_daily_avg(
     return _prediction_frame("MTD Daily Avg", item_id, actual, forecasts, window_index)
 
 
-def _predict_yoy_weekday_wow(
+def _predict_yoy_weekday_wow_original(
     item_id: str,
     actual: pd.DataFrame,
     train: pd.DataFrame,
     window_index: int,
 ) -> pd.DataFrame:
-    forecasts = _yoy_weekday_wow_forecasts(
+    forecasts, provenance = _yoy_weekday_wow_original_forecasts(
         history=train,
         target_dates=pd.DatetimeIndex(pd.to_datetime(actual["timestamp"])),
         context=pd.concat([train, actual], ignore_index=True),
@@ -304,46 +289,7 @@ def _predict_yoy_weekday_wow(
         actual,
         forecasts,
         window_index,
-    )
-
-
-def _predict_yoy_weekday_wow_original(
-    item_id: str,
-    actual: pd.DataFrame,
-    train: pd.DataFrame,
-    window_index: int,
-) -> pd.DataFrame:
-    forecasts = _yoy_weekday_wow_original_forecasts(
-        history=train,
-        target_dates=pd.DatetimeIndex(pd.to_datetime(actual["timestamp"])),
-        context=pd.concat([train, actual], ignore_index=True),
-    )
-    return _prediction_frame(
-        YOY_WEEKDAY_WOW_ORIGINAL_MODEL,
-        item_id,
-        actual,
-        forecasts,
-        window_index,
-    )
-
-
-def _predict_yoy_weekday_wow_hybrid(
-    item_id: str,
-    actual: pd.DataFrame,
-    train: pd.DataFrame,
-    window_index: int,
-) -> pd.DataFrame:
-    forecasts = _yoy_weekday_wow_hybrid_forecasts(
-        history=train,
-        target_dates=pd.DatetimeIndex(pd.to_datetime(actual["timestamp"])),
-        context=pd.concat([train, actual], ignore_index=True),
-    )
-    return _prediction_frame(
-        YOY_WEEKDAY_WOW_HYBRID_MODEL,
-        item_id,
-        actual,
-        forecasts,
-        window_index,
+        provenance=provenance,
     )
 
 
@@ -353,7 +299,7 @@ def _predict_yoy_weekday_dod(
     train: pd.DataFrame,
     window_index: int,
 ) -> pd.DataFrame:
-    forecasts = _yoy_weekday_dod_forecasts(
+    forecasts, provenance = _yoy_weekday_dod_forecasts(
         history=train,
         target_dates=pd.DatetimeIndex(pd.to_datetime(actual["timestamp"])),
         context=pd.concat([train, actual], ignore_index=True),
@@ -364,62 +310,8 @@ def _predict_yoy_weekday_dod(
         actual,
         forecasts,
         window_index,
+        provenance=provenance,
     )
-
-
-def _lagged_forecasts(
-    history: pd.DataFrame,
-    horizon: int,
-    lag: int,
-    fallback: float,
-) -> list[float]:
-    values = list(history["target"].astype(float))
-    forecasts: list[float] = []
-    for horizon_index in range(horizon):
-        forecasts.append(_seasonal_value(values, forecasts, lag, horizon_index, fallback))
-    return forecasts
-
-
-def _yoy_weekday_wow_forecasts(
-    *,
-    history: pd.DataFrame,
-    target_dates: pd.DatetimeIndex,
-    context: pd.DataFrame,
-) -> list[float]:
-    """Roll current-year values forward with prior-year weekday-aligned WoW ratios.
-
-    A target date is first anchored to the same natural calendar date one year
-    earlier, then shifted to the nearest matching weekday.  The prior-year
-    week-over-week ratio is applied to the target date's current-year value from
-    seven days earlier.  Forecasts therefore become the base for the next week.
-    """
-    ordered = history.dropna(subset=["timestamp", "target"]).copy()
-    ordered["timestamp"] = pd.to_datetime(ordered["timestamp"]).dt.normalize()
-    ordered = ordered.sort_values("timestamp").drop_duplicates("timestamp", keep="last")
-    values = {
-        timestamp: float(target)
-        for timestamp, target in zip(ordered["timestamp"], ordered["target"], strict=False)
-    }
-    if not values:
-        return [0.0] * len(target_dates)
-
-    context_indexed = _prepare_context(context)
-    fallback = float(ordered["target"].iloc[-1])
-    forecasts: list[float] = []
-    for raw_timestamp in target_dates:
-        timestamp = pd.Timestamp(raw_timestamp).normalize()
-        base = values.get(timestamp - pd.Timedelta(days=7))
-        if base is None or not math.isfinite(base):
-            base = forecasts[-7] if len(forecasts) >= 7 else fallback
-        ratio = _select_yoy_weekly_ratio(
-            timestamp=timestamp,
-            history_values=values,
-            context=context_indexed,
-        )
-        forecast = float(base * ratio)
-        values[timestamp] = forecast
-        forecasts.append(forecast)
-    return forecasts
 
 
 def _yoy_weekday_wow_original_forecasts(
@@ -427,7 +319,7 @@ def _yoy_weekday_wow_original_forecasts(
     history: pd.DataFrame,
     target_dates: pd.DatetimeIndex,
     context: pd.DataFrame,
-) -> list[float]:
+) -> tuple[list[float], list[dict[str, object]]]:
     """Original weekday-aligned YoY WoW baseline from record.py."""
     ordered = history.dropna(subset=["timestamp", "target"]).copy()
     ordered["timestamp"] = pd.to_datetime(ordered["timestamp"]).dt.normalize()
@@ -437,16 +329,21 @@ def _yoy_weekday_wow_original_forecasts(
         for timestamp, target in zip(ordered["timestamp"], ordered["target"], strict=False)
     }
     if not values:
-        return [0.0] * len(target_dates)
+        return [0.0] * len(target_dates), [_empty_provenance("前一周值 × 去年周环比") for _ in target_dates]
 
     context_indexed = _prepare_context(context)
     fallback = float(ordered["target"].iloc[-1])
     forecasts: list[float] = []
+    provenance: list[dict[str, object]] = []
     for raw_timestamp in target_dates:
         timestamp = pd.Timestamp(raw_timestamp).normalize()
-        base = values.get(timestamp - pd.Timedelta(days=7))
+        base_timestamp = timestamp - pd.Timedelta(days=7)
+        base = values.get(base_timestamp)
         if base is None or not math.isfinite(base):
             base = forecasts[-7] if len(forecasts) >= 7 else fallback
+        aligned = _align_to_prior_year_weekday(timestamp)
+        comparison_timestamp = aligned - pd.Timedelta(days=7)
+        raw_ratio = _weekly_ratio(values, aligned)
         ratio = _select_yoy_weekly_ratio_original(
             timestamp=timestamp,
             history_values=values,
@@ -455,127 +352,21 @@ def _yoy_weekday_wow_original_forecasts(
         forecast = float(base * ratio)
         values[timestamp] = forecast
         forecasts.append(forecast)
-    return forecasts
-
-
-def _yoy_weekday_wow_hybrid_forecasts(
-    *,
-    history: pd.DataFrame,
-    target_dates: pd.DatetimeIndex,
-    context: pd.DataFrame,
-) -> list[float]:
-    ordered = history.dropna(subset=["timestamp", "target"]).copy()
-    if ordered.empty:
-        return [0.0] * len(target_dates)
-    ordered["timestamp"] = pd.to_datetime(ordered["timestamp"]).dt.normalize()
-    ordered = ordered.sort_values("timestamp").drop_duplicates("timestamp", keep="last")
-
-    original_weight = _select_yoy_weekday_wow_hybrid_weight(
-        history=ordered,
-        context=context,
-        prediction_length=len(target_dates),
-    )
-    original_forecasts = _yoy_weekday_wow_original_forecasts(
-        history=ordered,
-        target_dates=target_dates,
-        context=context,
-    )
-    fallback = float(ordered["target"].iloc[-1])
-    seasonal_forecasts = _lagged_forecasts(
-        ordered,
-        len(target_dates),
-        SEASONAL_LAG["D"],
-        fallback,
-    )
-    return [
-        float(original_weight * original + (1.0 - original_weight) * seasonal)
-        for original, seasonal in zip(original_forecasts, seasonal_forecasts, strict=False)
-    ]
-
-
-def _select_yoy_weekday_wow_hybrid_weight(
-    *,
-    history: pd.DataFrame,
-    context: pd.DataFrame,
-    prediction_length: int,
-) -> float:
-    validation_length = min(max(1, prediction_length), 30)
-    scores = {weight: 0.0 for weight in YOY_WEEKDAY_HYBRID_ORIGINAL_WEIGHTS}
-    evaluated_windows = 0
-
-    for window_index in range(YOY_WEEKDAY_HYBRID_VALIDATION_WINDOWS):
-        validation_end = len(history) - window_index * validation_length
-        validation_start = validation_end - validation_length
-        if validation_start <= 0:
-            continue
-        train = history.iloc[:validation_start].copy()
-        actual = history.iloc[validation_start:validation_end].copy()
-        if train.empty or actual.empty:
-            continue
-
-        target_dates = pd.DatetimeIndex(pd.to_datetime(actual["timestamp"]))
-        validation_context = _validation_context_for_dates(
-            context=context,
-            train=train,
-            actual=actual,
+        provenance.append(
+            _ratio_provenance(
+                basis="前一周值 × 去年周环比",
+                base_timestamp=base_timestamp,
+                base_value=base,
+                prior_year_timestamp=aligned,
+                prior_year_value=values.get(aligned),
+                comparison_timestamp=comparison_timestamp,
+                comparison_value=values.get(comparison_timestamp),
+                applied_ratio=ratio - 1.0,
+                raw_ratio=raw_ratio - 1.0 if raw_ratio is not None else None,
+                ratio_name="去年对齐日周环比",
+            )
         )
-        original_forecasts = _yoy_weekday_wow_original_forecasts(
-            history=train,
-            target_dates=target_dates,
-            context=validation_context,
-        )
-        fallback = float(train["target"].iloc[-1])
-        seasonal_forecasts = _lagged_forecasts(
-            train,
-            len(target_dates),
-            SEASONAL_LAG["D"],
-            fallback,
-        )
-        actual_values = pd.to_numeric(actual["target"], errors="coerce").astype(float).to_list()
-        for weight in YOY_WEEKDAY_HYBRID_ORIGINAL_WEIGHTS:
-            hybrid_forecasts = [
-                float(weight * original + (1.0 - weight) * seasonal)
-                for original, seasonal in zip(
-                    original_forecasts,
-                    seasonal_forecasts,
-                    strict=False,
-                )
-            ]
-            scores[weight] += _wape(actual_values, hybrid_forecasts)
-        evaluated_windows += 1
-
-    if evaluated_windows == 0:
-        return 0.5
-    return min(
-        YOY_WEEKDAY_HYBRID_ORIGINAL_WEIGHTS,
-        key=lambda weight: (scores[weight] / evaluated_windows, abs(weight - 0.5)),
-    )
-
-
-def _validation_context_for_dates(
-    *,
-    context: pd.DataFrame,
-    train: pd.DataFrame,
-    actual: pd.DataFrame,
-) -> pd.DataFrame:
-    if context.empty:
-        return pd.concat([train, actual], ignore_index=True)
-    timestamps = pd.to_datetime(context["timestamp"]).dt.normalize()
-    max_timestamp = pd.Timestamp(actual["timestamp"].max()).normalize()
-    return context.loc[timestamps.le(max_timestamp)].copy()
-
-
-def _wape(actual_values: list[float], forecast_values: list[float]) -> float:
-    pairs = [
-        (actual, forecast)
-        for actual, forecast in zip(actual_values, forecast_values, strict=False)
-        if math.isfinite(actual) and math.isfinite(forecast)
-    ]
-    if not pairs:
-        return math.inf
-    denominator = sum(abs(actual) for actual, _ in pairs)
-    numerator = sum(abs(forecast - actual) for actual, forecast in pairs)
-    return numerator / denominator if denominator else numerator / len(pairs)
+    return forecasts, provenance
 
 
 def _yoy_weekday_dod_forecasts(
@@ -583,7 +374,7 @@ def _yoy_weekday_dod_forecasts(
     history: pd.DataFrame,
     target_dates: pd.DatetimeIndex,
     context: pd.DataFrame,
-) -> list[float]:
+) -> tuple[list[float], list[dict[str, object]]]:
     """Roll values forward with prior-year weekday-aligned day-over-day growth."""
     ordered = history.dropna(subset=["timestamp", "target"]).copy()
     ordered["timestamp"] = pd.to_datetime(ordered["timestamp"]).dt.normalize()
@@ -593,16 +384,21 @@ def _yoy_weekday_dod_forecasts(
         for timestamp, target in zip(ordered["timestamp"], ordered["target"], strict=False)
     }
     if not values:
-        return [0.0] * len(target_dates)
+        return [0.0] * len(target_dates), [_empty_provenance("前一天值 × 去年日环比") for _ in target_dates]
 
     context_indexed = _prepare_context(context)
     fallback = float(ordered["target"].iloc[-1])
     forecasts: list[float] = []
+    provenance: list[dict[str, object]] = []
     for raw_timestamp in target_dates:
         timestamp = pd.Timestamp(raw_timestamp).normalize()
-        base = values.get(timestamp - pd.Timedelta(days=1))
+        base_timestamp = timestamp - pd.Timedelta(days=1)
+        base = values.get(base_timestamp)
         if base is None or not math.isfinite(base):
             base = forecasts[-1] if forecasts else fallback
+        aligned = _align_to_prior_year_weekday(timestamp)
+        comparison_timestamp = aligned - pd.Timedelta(days=1)
+        raw_rate = _daily_change_rate(values, aligned)
         rate = _select_yoy_daily_change_rate(
             timestamp=timestamp,
             history_values=values,
@@ -611,7 +407,21 @@ def _yoy_weekday_dod_forecasts(
         forecast = float(base * (1.0 + rate))
         values[timestamp] = forecast
         forecasts.append(forecast)
-    return forecasts
+        provenance.append(
+            _ratio_provenance(
+                basis="前一天值 × 去年日环比",
+                base_timestamp=base_timestamp,
+                base_value=base,
+                prior_year_timestamp=aligned,
+                prior_year_value=values.get(aligned),
+                comparison_timestamp=comparison_timestamp,
+                comparison_value=values.get(comparison_timestamp),
+                applied_ratio=rate,
+                raw_ratio=raw_rate,
+                ratio_name="去年对齐日日环比",
+            )
+        )
+    return forecasts, provenance
 
 
 def _select_yoy_weekly_ratio(
@@ -998,9 +808,14 @@ def _prediction_frame(
     actual: pd.DataFrame,
     forecasts: list[float],
     window_index: int,
+    provenance: list[dict[str, object]] | None = None,
 ) -> pd.DataFrame:
     actual_values = pd.to_numeric(actual["target"], errors="coerce")
-    return pd.DataFrame(
+    if provenance is None:
+        provenance = [{} for _ in forecasts]
+    if len(provenance) != len(forecasts):
+        raise ValueError("provenance length must match forecasts")
+    frame = pd.DataFrame(
         {
             "item_id": item_id,
             "timestamp": actual["timestamp"].to_list(),
@@ -1014,6 +829,9 @@ def _prediction_frame(
             "forecast_p90": forecasts,
         }
     )
+    for column in PREDICTION_PROVENANCE_COLUMNS:
+        frame[column] = [row.get(column, pd.NA) for row in provenance]
+    return frame
 
 
 def _seasonal_value(
@@ -1058,4 +876,36 @@ def _prediction_columns() -> list[str]:
         "error",
         "absolute_error",
         "error_rate",
+        *PREDICTION_PROVENANCE_COLUMNS,
     ]
+
+
+def _empty_provenance(basis: str) -> dict[str, object]:
+    return {"预测依据": basis, "环比来源": "历史不足，使用默认值"}
+
+
+def _ratio_provenance(
+    *,
+    basis: str,
+    base_timestamp: pd.Timestamp,
+    base_value: float,
+    prior_year_timestamp: pd.Timestamp,
+    prior_year_value: float | None,
+    comparison_timestamp: pd.Timestamp,
+    comparison_value: float | None,
+    applied_ratio: float,
+    raw_ratio: float | None,
+    ratio_name: str,
+) -> dict[str, object]:
+    used_raw_ratio = raw_ratio is not None and math.isclose(applied_ratio, raw_ratio)
+    return {
+        "预测依据": basis,
+        "预测基准日期": base_timestamp,
+        "预测基准值": base_value,
+        "去年环比日期": prior_year_timestamp,
+        "去年环比值": prior_year_value,
+        "去年环比对比日期": comparison_timestamp,
+        "去年环比对比值": comparison_value,
+        "实际采用环比": applied_ratio,
+        "环比来源": ratio_name if used_raw_ratio else f"{ratio_name}稳健参考",
+    }

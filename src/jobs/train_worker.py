@@ -302,7 +302,6 @@ def main() -> None:
         )
 
         progress(WorkerStage.BUILD_EXPORT, 90, "正在落盘结果并生成 Excel 评测报告")
-        quality_report = _quality_report_frame(experiment_dir / "data_profile.json")
         metadata = _runtime_metadata(config)
         write_json(
             experiment_dir / "results" / "conclusion.json", {"conclusion": conclusion, **metadata}
@@ -322,15 +321,11 @@ def main() -> None:
         export_path = export_evaluation_workbook(
             output_dir=experiment_dir / "exports",
             experiment_name=config.name,
-            conclusion=conclusion,
-            leaderboard=leaderboard,
-            aggregate_metrics=aggregate_metrics,
-            series_metrics=series_metrics,
+            normalized_data=normalized_data,
             backtest_predictions=backtest_predictions,
             future_forecast=future_forecast,
-            future_driver_assumptions=future_driver_assumptions,
-            quality_report=quality_report,
-            config={**asdict(config), **metadata},
+            best_model=str(best_model["model"]),
+            config=asdict(config),
         )
         write_json(experiment_dir / "results" / "export.json", {"path": str(export_path)})
 
@@ -418,11 +413,6 @@ def _fail(
             "error_code": error_code,
         },
     )
-
-
-def _quality_report_frame(profile_path: Path) -> pd.DataFrame:
-    profile = read_json(profile_path)
-    return pd.DataFrame(profile.get("issues", []))
 
 
 def _runtime_metadata(config: ExperimentConfig) -> dict[str, str]:

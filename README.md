@@ -67,8 +67,7 @@ Worker 独立子进程运行，页面通过 SQLite、`progress.json` 和 Parquet
 - Improvement：最佳模型相对最佳业务基线的 WAPE 改善率
 
 业务基线始终参与统一排行榜。日频除 Last Value、Seasonal Naive、Rolling Mean 外，
-还包括 YoY、WoW、MTD Daily Avg，以及面向出行业务的 `YoY Weekday WoW` / `YoY Weekday WoW Original` / `YoY Weekday WoW Hybrid` / `YoY Weekday DoD`：
-按自然日同比锚点对齐去年同星期，分别使用去年周环比或日环比滚动今年基数；现有 YoY Weekday WoW/DoD 在同比锚点天气/节假日不匹配，或原始比例较稳健参考偏离超过 25% 时，参考周围同星期且条件一致的比例中位数。Original 保留 record.py 中基于 25% 周环比偏离阈值的原始修正规则；Hybrid 则在训练尾部验证窗中自适应选择 Seasonal Naive 与 Original 的组合权重。
+还包括 YoY、WoW、MTD Daily Avg，以及面向出行业务的 `YoY Weekday WoW` / `YoY Weekday DoD`。其中 `YoY Weekday WoW` 保留原 `YoY Weekday WoW Original` 的逻辑：按自然日同比锚点对齐去年同星期，使用去年周环比滚动今年基数；当原始周环比相对相邻同星期参考值偏离超过 25% 时，使用参考值修正。`YoY Weekday DoD` 使用同样的同比对齐方式，但按日变化率推演。
 
 ## 数据隐私
 

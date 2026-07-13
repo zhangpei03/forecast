@@ -2,48 +2,177 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
+
+from src.core.constants import PREDICTION_PROVENANCE_COLUMNS
+
+
+def prepare_export_frames(
+    *,
+    normalized_data: pd.DataFrame,
+    backtest_predictions: pd.DataFrame,
+    future_forecast: pd.DataFrame,
+    best_model: str,
+    config: dict[str, Any],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Build the two user-facing export tables with the original column names.
+
+    The deviation table uses the most recent backtest window of the winning model,
+    which is the historical period immediately before the future forecast interval.
+    """
+
+    timestamp_column = str(config.get("timestamp_column") or "timestamp")
+    target_column = str(config.get("target_column") or "target")
+    item_columns = [str(column) for column in config.get("item_columns", [])]
+    forecast_column = f"{target_column}预测值"
+
+    dimensions = _dimensions_by_timestamp(normalized_data, item_columns)
+    deviation_source = _latest_backtest_window(backtest_predictions, best_model)
+    deviation = _with_original_columns(
+        deviation_source,
+        dimensions,
+        item_columns=item_columns,
+        timestamp_column=timestamp_column,
+    )
+    future = _with_original_columns(
+        future_forecast,
+        dimensions,
+        item_columns=item_columns,
+        timestamp_column=timestamp_column,
+    )
+
+    deviation_columns = [
+        *item_columns,
+        timestamp_column,
+        "预测算法",
+        target_column,
+        forecast_column,
+        "误差率",
+        *PREDICTION_PROVENANCE_COLUMNS,
+    ]
+    future_columns = [
+        *item_columns,
+        timestamp_column,
+        "预测算法",
+        forecast_column,
+        *PREDICTION_PROVENANCE_COLUMNS,
+    ]
+    deviation_export = pd.DataFrame(
+        {
+            **{column: deviation.get(column, pd.NA) for column in item_columns},
+            timestamp_column: deviation.get(timestamp_column, pd.NaT),
+            "预测算法": deviation.get("model", best_model),
+            target_column: deviation.get("actual", pd.NA),
+            forecast_column: _forecast_values(deviation),
+            "误差率": deviation.get("error_rate", pd.NA),
+            **{column: deviation.get(column, pd.NA) for column in PREDICTION_PROVENANCE_COLUMNS},
+        }
+    )
+    future_export = pd.DataFrame(
+        {
+            **{column: future.get(column, pd.NA) for column in item_columns},
+            timestamp_column: future.get(timestamp_column, pd.NaT),
+            "预测算法": future.get("model", best_model),
+            forecast_column: _forecast_values(future),
+            **{column: future.get(column, pd.NA) for column in PREDICTION_PROVENANCE_COLUMNS},
+        }
+    )
+    return (
+        deviation_export.loc[:, deviation_columns],
+        future_export.loc[:, future_columns],
+    )
 
 
 def export_evaluation_workbook(
     *,
     output_dir: Path,
     experiment_name: str,
-    conclusion: str,
-    leaderboard: pd.DataFrame,
-    aggregate_metrics: pd.DataFrame,
-    series_metrics: pd.DataFrame,
+    normalized_data: pd.DataFrame,
     backtest_predictions: pd.DataFrame,
     future_forecast: pd.DataFrame,
-    future_driver_assumptions: pd.DataFrame,
-    quality_report: pd.DataFrame,
-    config: dict,
+    best_model: str,
+    config: dict[str, Any],
 ) -> Path:
+    """Export only the deviation comparison and future forecast tables."""
+
     output_dir.mkdir(parents=True, exist_ok=True)
     safe_name = "".join(char if char.isalnum() or char in "-_" else "_" for char in experiment_name)
-    output_path = output_dir / f"{safe_name}_预测评测_{datetime.now():%Y%m%d_%H%M}.xlsx"
+    output_path = output_dir / f"{safe_name}_预测结果_{datetime.now():%Y%m%d_%H%M}.xlsx"
+    deviation, future = prepare_export_frames(
+        normalized_data=normalized_data,
+        backtest_predictions=backtest_predictions,
+        future_forecast=future_forecast,
+        best_model=best_model,
+        config=config,
+    )
 
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        pd.DataFrame([{"业务结论": conclusion}]).to_excel(
-            writer, sheet_name="评测结论", index=False
-        )
-        leaderboard.to_excel(writer, sheet_name="模型排行榜", index=False)
-        aggregate_metrics.to_excel(writer, sheet_name="回测汇总", index=False)
-        series_metrics.to_excel(writer, sheet_name="序列评测", index=False)
-        backtest_predictions.to_excel(writer, sheet_name="期间偏差明细", index=False)
-        future_forecast.to_excel(writer, sheet_name="未来预测", index=False)
-        future_driver_assumptions.to_excel(writer, sheet_name="未来驱动假设", index=False)
-        quality_report.to_excel(writer, sheet_name="数据质量", index=False)
-        pd.DataFrame([config]).to_excel(writer, sheet_name="实验配置", index=False)
+        deviation.to_excel(writer, sheet_name="偏差对比", index=False)
+        future.to_excel(writer, sheet_name="未来预测", index=False)
 
         for worksheet in writer.book.worksheets:
             worksheet.freeze_panes = "A2"
             worksheet.auto_filter.ref = worksheet.dimensions
             for column_cells in worksheet.columns:
+                header = str(column_cells[0].value or "")
+                if header.endswith("误差率") or header in {"误差率", "实际采用环比"}:
+                    for cell in column_cells[1:]:
+                        cell.number_format = "0.00%"
+                elif header.endswith("日期"):
+                    for cell in column_cells[1:]:
+                        cell.number_format = "yyyy-mm-dd"
+                elif header.endswith("预测值") or header == str(config.get("target_column") or ""):
+                    for cell in column_cells[1:]:
+                        cell.number_format = "#,##0.00"
+                elif header in {"预测基准值", "去年环比值", "去年环比对比值"}:
+                    for cell in column_cells[1:]:
+                        cell.number_format = "#,##0.00"
                 max_length = max(len(str(cell.value or "")) for cell in column_cells)
                 worksheet.column_dimensions[column_cells[0].column_letter].width = min(
                     max_length + 2, 42
                 )
 
     return output_path
+
+
+def _dimensions_by_timestamp(data: pd.DataFrame, item_columns: list[str]) -> pd.DataFrame:
+    columns = ["item_id", "timestamp", *item_columns]
+    available = [column for column in columns if column in data.columns]
+    dimensions = data.loc[:, available].copy()
+    dimensions["timestamp"] = pd.to_datetime(dimensions["timestamp"])
+    return dimensions.drop_duplicates(["item_id", "timestamp"], keep="last")
+
+
+def _latest_backtest_window(predictions: pd.DataFrame, best_model: str) -> pd.DataFrame:
+    selected = predictions[predictions.get("model", pd.Series(dtype=str)).eq(best_model)].copy()
+    if selected.empty:
+        return selected
+    selected["timestamp"] = pd.to_datetime(selected["timestamp"])
+    latest_timestamp = selected["timestamp"].max()
+    latest_windows = selected.loc[selected["timestamp"].eq(latest_timestamp), "window_id"].dropna()
+    if latest_windows.empty:
+        return selected.loc[selected["timestamp"].eq(latest_timestamp)]
+    return selected[selected["window_id"].eq(latest_windows.iloc[0])]
+
+
+def _with_original_columns(
+    predictions: pd.DataFrame,
+    dimensions: pd.DataFrame,
+    *,
+    item_columns: list[str],
+    timestamp_column: str,
+) -> pd.DataFrame:
+    result = predictions.copy()
+    if result.empty:
+        return result
+    result["timestamp"] = pd.to_datetime(result["timestamp"])
+    result = result.merge(dimensions, on=["item_id", "timestamp"], how="left")
+    return result.rename(columns={"timestamp": timestamp_column})
+
+
+def _forecast_values(data: pd.DataFrame) -> pd.Series:
+    if "forecast_p50" in data:
+        return data["forecast_p50"]
+    return data.get("forecast_mean", pd.Series(pd.NA, index=data.index))

@@ -13,6 +13,8 @@ from src.core.constants import (
     BASELINE_MODEL_NAMES,
     CUSTOM_MODEL_NAMES,
     DEFAULT_PREDICTION_LENGTH,
+    MODEL_CATALOG,
+    MODEL_CATEGORY_ORDER,
     MODEL_FAMILY_AUTOGLUON,
     MODEL_FAMILY_BASELINE,
     MODEL_FAMILY_CUSTOM,
@@ -60,25 +62,27 @@ page_header(
 )
 
 
-def _model_options(freq: str) -> dict[str, tuple[str, str]]:
+def _model_options(freq: str) -> dict[str, tuple[str, str, str, str]]:
     baseline_models = (
         BASELINE_MODEL_NAMES
         if freq == "D"
         else ("Last Value", "Seasonal Naive", "Rolling Mean")
     )
-    options: dict[str, tuple[str, str]] = {}
-    for model in baseline_models:
-        options[f"业务基线：{model}"] = (MODEL_FAMILY_BASELINE, model)
-    for model in CUSTOM_MODEL_NAMES:
-        options[f"外部模型：{model}"] = (MODEL_FAMILY_CUSTOM, model)
-    for model in AUTOGLUON_MODEL_NAMES:
-        options[f"AutoGluon：{model}"] = (MODEL_FAMILY_AUTOGLUON, model)
+    options: dict[str, tuple[str, str, str, str]] = {}
+    for family, models in (
+        (MODEL_FAMILY_BASELINE, baseline_models),
+        (MODEL_FAMILY_CUSTOM, CUSTOM_MODEL_NAMES),
+        (MODEL_FAMILY_AUTOGLUON, AUTOGLUON_MODEL_NAMES),
+    ):
+        for model in models:
+            category, description = MODEL_CATALOG[(family, model)]
+            options[f"{category}：{model}"] = (family, model, category, description)
     return options
 
 
 def _selected_model_entries(
     selected_labels: list[str],
-    model_options: dict[str, tuple[str, str]],
+    model_options: dict[str, tuple[str, str, str, str]],
 ) -> list[dict[str, str]]:
     return [
         {
@@ -89,6 +93,15 @@ def _selected_model_entries(
         for label in selected_labels
         if label in model_options
     ]
+
+
+def _model_labels_by_category(
+    model_options: dict[str, tuple[str, str, str, str]],
+) -> dict[str, list[str]]:
+    labels_by_category = {category: [] for category in MODEL_CATEGORY_ORDER}
+    for label, (_, _, category, _) in model_options.items():
+        labels_by_category.setdefault(category, []).append(label)
+    return {category: labels for category, labels in labels_by_category.items() if labels}
 
 
 def _selected_model_summary(selected_labels: list[str]) -> str:
@@ -324,10 +337,27 @@ if step == "3 预测配置":
     with c3:
         st.markdown("#### 训练模式")
         model_options = _model_options(profile.frequency)
+        category_labels = _model_labels_by_category(model_options)
+        available_labels = set(model_options)
+        current_labels = [
+            label
+            for label in st.session_state.get("selected_model_labels", [])
+            if label in available_labels
+        ]
+        if not current_labels:
+            st.session_state.selected_model_labels = [next(iter(model_options))]
+        else:
+            st.session_state.selected_model_labels = current_labels
+        st.caption("按类别一键替换当前选择，或在下方单独勾选算法。")
+        for category_index in range(0, len(category_labels), 3):
+            category_row = list(category_labels.items())[category_index : category_index + 3]
+            for column, (category, labels) in zip(st.columns(3), category_row, strict=False):
+                if column.button(f"全选{category}", key=f"select_model_category_{category}"):
+                    st.session_state.selected_model_labels = labels
         selected_model_labels = st.multiselect(
             "预测方法/模型",
             list(model_options),
-            default=[next(iter(model_options))],
+            key="selected_model_labels",
         )
         selected_models = _selected_model_entries(selected_model_labels, model_options)
         if not selected_models:
@@ -341,6 +371,13 @@ if step == "3 预测配置":
             value=int(preset_config["time_limit_seconds"]),
         )
         st.caption(preset_config["description"])
+
+    with st.expander("算法说明与选择建议", expanded=False):
+        for category, labels in category_labels.items():
+            st.markdown(f"**{category}**")
+            for label in labels:
+                _, model, _, description = model_options[label]
+                st.markdown(f"- `{model}`：{description}")
 
     # ── 已配置列表：展示 + 编辑/删除 ──
     st.markdown("#### 预测驱动配置")
