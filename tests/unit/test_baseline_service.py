@@ -7,6 +7,7 @@ from src.core.constants import BASELINE_MODEL_NAMES
 from src.services.baseline_service import (
     YOY_WEEKDAY_DOD_MODEL,
     YOY_WEEKDAY_WOW_MODEL,
+    _align_daily_ratio_date,
     _align_to_prior_year_weekday,
     generate_baseline_backtest_predictions,
     generate_baseline_future_forecast,
@@ -58,7 +59,7 @@ def test_selected_baseline_runs_only_the_requested_model() -> None:
     assert set(predictions["model"]) == {"Rolling Mean"}
 
 
-def test_renamed_yoy_weekday_wow_keeps_the_original_volatility_rule() -> None:
+def test_yoy_weekday_wow_keeps_the_raw_ratio_when_it_differs_from_nearby_values() -> None:
     history_dates = pd.date_range("2025-06-01", "2026-07-01", freq="D")
     targets = pd.Series(100.0, index=history_dates)
     weather = pd.Series(0, index=history_dates, dtype=int)
@@ -92,7 +93,7 @@ def test_renamed_yoy_weekday_wow_keeps_the_original_volatility_rule() -> None:
     )
 
     row = future.iloc[0]
-    assert row["forecast_p50"] == pytest.approx(330.0)
+    assert row["forecast_p50"] == pytest.approx(600.0)
     assert row["预测依据"] == "前一周值 × 去年周环比"
     assert row["预测基准日期"] == pd.Timestamp("2026-06-25")
     assert row["预测基准值"] == pytest.approx(300.0)
@@ -100,8 +101,8 @@ def test_renamed_yoy_weekday_wow_keeps_the_original_volatility_rule() -> None:
     assert row["去年环比值"] == pytest.approx(200.0)
     assert row["去年环比对比日期"] == pd.Timestamp("2025-06-26")
     assert row["去年环比对比值"] == pytest.approx(100.0)
-    assert row["实际采用环比"] == pytest.approx(0.1)
-    assert row["环比来源"] == "去年对齐日周环比稳健参考"
+    assert row["实际采用环比"] == pytest.approx(1.0)
+    assert row["环比来源"] == "去年对齐日周环比"
 
 
 def test_yoy_weekday_dod_records_the_values_used_for_each_forecast() -> None:
@@ -136,3 +137,43 @@ def test_prior_year_alignment_uses_nearest_matching_weekday() -> None:
 
     assert aligned == pd.Timestamp("2025-07-03")
     assert aligned.weekday() == pd.Timestamp("2026-07-02").weekday()
+
+
+def test_daily_ratio_alignment_prioritizes_holiday_code_before_weekday() -> None:
+    context = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-09-17", "2025-10-01", "2026-09-25"]),
+            "特殊假期": ["Z1", "G1", "Z1"],
+        }
+    ).set_index("timestamp")
+
+    aligned, source = _align_daily_ratio_date(pd.Timestamp("2026-09-25"), context)
+
+    assert aligned == pd.Timestamp("2024-09-17")
+    assert source == "前年同假期日环比"
+
+
+def test_daily_ratio_alignment_uses_nearest_prior_year_holiday_with_same_day_number() -> None:
+    context = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2025-10-01", "2025-05-01", "2026-09-25"]),
+            "特殊假期": ["G1", "L1", "Z1"],
+        }
+    ).set_index("timestamp")
+
+    aligned, source = _align_daily_ratio_date(pd.Timestamp("2026-09-25"), context)
+
+    assert aligned == pd.Timestamp("2025-10-01")
+    assert source == "去年最近同假期天数日环比"
+
+
+def test_daily_ratio_alignment_uses_weekday_for_none_holiday_code() -> None:
+    target = pd.Timestamp("2026-07-02")
+    context = pd.DataFrame(
+        {"timestamp": [target], "特殊假期": ["None"]}
+    ).set_index("timestamp")
+
+    aligned, source = _align_daily_ratio_date(target, context)
+
+    assert aligned == _align_to_prior_year_weekday(target)
+    assert source == "去年对齐日日环比"

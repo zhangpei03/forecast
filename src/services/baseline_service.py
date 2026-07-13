@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 
 import pandas as pd
 
@@ -18,8 +19,6 @@ BASELINE_MODELS = BASELINE_MODEL_NAMES
 YOY_LAG = {"M": 12, "W": 52, "D": 365}
 WOW_LAG = {"M": 1, "W": 1, "D": 7}
 YOY_RATIO_SEARCH_WEEKS = 4
-YOY_WEEKDAY_ROBUST_DEVIATION_THRESHOLD = 0.25
-YOY_WEEKDAY_WOW_ORIGINAL_VOLATILITY_THRESHOLD = 0.25
 WEATHER_COLUMN_TOKENS = ("天气", "雨雪", "weather", "rain", "snow")
 HOLIDAY_COLUMN_TOKENS = ("节假日", "假期", "holiday")
 
@@ -396,11 +395,12 @@ def _yoy_weekday_dod_forecasts(
         base = values.get(base_timestamp)
         if base is None or not math.isfinite(base):
             base = forecasts[-1] if forecasts else fallback
-        aligned = _align_to_prior_year_weekday(timestamp)
+        aligned, ratio_name = _align_daily_ratio_date(timestamp, context_indexed)
         comparison_timestamp = aligned - pd.Timedelta(days=1)
         raw_rate = _daily_change_rate(values, aligned)
         rate = _select_yoy_daily_change_rate(
             timestamp=timestamp,
+            aligned=aligned,
             history_values=values,
             context=context_indexed,
         )
@@ -418,7 +418,7 @@ def _yoy_weekday_dod_forecasts(
                 comparison_value=values.get(comparison_timestamp),
                 applied_ratio=rate,
                 raw_ratio=raw_rate,
-                ratio_name="去年对齐日日环比",
+                ratio_name=ratio_name,
             )
         )
     return forecasts, provenance
@@ -432,6 +432,9 @@ def _select_yoy_weekly_ratio(
 ) -> float:
     aligned = _align_to_prior_year_weekday(timestamp)
     raw_ratio = _weekly_ratio(history_values, aligned)
+    if raw_ratio is not None:
+        return raw_ratio
+
     condition_columns = _condition_columns(context)
     target_conditions = _condition_values(context, timestamp, condition_columns)
     previous_conditions = _condition_values(
@@ -439,13 +442,6 @@ def _select_yoy_weekly_ratio(
         timestamp - pd.Timedelta(days=7),
         condition_columns,
     )
-    raw_condition_mismatch = not _conditions_match(
-        context,
-        aligned,
-        condition_columns,
-        target_conditions,
-    )
-
     candidates = _ratio_candidates(
         aligned=aligned,
         history_values=history_values,
@@ -464,19 +460,9 @@ def _select_yoy_weekly_ratio(
             target_conditions=target_conditions,
             previous_conditions=previous_conditions,
             same_month_only=False,
-        )
+    )
     reference_ratio = _surrounding_ratio_median(candidates, aligned)
-    if raw_ratio is None:
-        return reference_ratio if reference_ratio is not None else 1.0
-    if reference_ratio is None or reference_ratio == 0:
-        return raw_ratio
-    ratio_deviation = _relative_factor_deviation(raw_ratio, reference_ratio)
-    if (
-        raw_condition_mismatch
-        or ratio_deviation > YOY_WEEKDAY_ROBUST_DEVIATION_THRESHOLD
-    ):
-        return reference_ratio
-    return raw_ratio
+    return reference_ratio if reference_ratio is not None else 1.0
 
 
 def _select_yoy_weekly_ratio_original(
@@ -487,6 +473,9 @@ def _select_yoy_weekly_ratio_original(
 ) -> float:
     aligned = _align_to_prior_year_weekday(timestamp)
     raw_ratio = _weekly_ratio(history_values, aligned)
+    if raw_ratio is not None:
+        return raw_ratio
+
     condition_columns = _condition_columns(context)
     target_conditions = _condition_values(context, timestamp, condition_columns)
     previous_conditions = _condition_values(
@@ -513,38 +502,28 @@ def _select_yoy_weekly_ratio_original(
             target_conditions=target_conditions,
             previous_conditions=previous_conditions,
             same_month_only=False,
-        )
+    )
     reference_ratio = _surrounding_ratio_median(candidates, aligned)
-    if raw_ratio is None:
-        return reference_ratio if reference_ratio is not None else 1.0
-    if reference_ratio is None or reference_ratio == 0:
-        return raw_ratio
-    relative_deviation = abs(raw_ratio / reference_ratio - 1.0)
-    if relative_deviation > YOY_WEEKDAY_WOW_ORIGINAL_VOLATILITY_THRESHOLD:
-        return reference_ratio
-    return raw_ratio
+    return reference_ratio if reference_ratio is not None else 1.0
 
 
 def _select_yoy_daily_change_rate(
     *,
     timestamp: pd.Timestamp,
+    aligned: pd.Timestamp,
     history_values: dict[pd.Timestamp, float],
     context: pd.DataFrame,
 ) -> float:
-    aligned = _align_to_prior_year_weekday(timestamp)
     raw_rate = _daily_change_rate(history_values, aligned)
+    if raw_rate is not None:
+        return raw_rate
+
     condition_columns = _condition_columns(context)
     target_conditions = _condition_values(context, timestamp, condition_columns)
     previous_conditions = _condition_values(
         context,
         timestamp - pd.Timedelta(days=1),
         condition_columns,
-    )
-    raw_condition_mismatch = not _conditions_match(
-        context,
-        aligned,
-        condition_columns,
-        target_conditions,
     )
     candidates = _daily_change_candidates(
         aligned=aligned,
@@ -564,25 +543,106 @@ def _select_yoy_daily_change_rate(
             target_conditions=target_conditions,
             previous_conditions=previous_conditions,
             same_month_only=False,
-        )
+    )
     reference_rate = _daily_change_reference_median(candidates, aligned)
-    if raw_rate is None:
-        return reference_rate if reference_rate is not None else 0.0
-    if reference_rate is None:
-        return raw_rate
-    rate_deviation = _relative_factor_deviation(1.0 + raw_rate, 1.0 + reference_rate)
-    if (
-        raw_condition_mismatch
-        or rate_deviation > YOY_WEEKDAY_ROBUST_DEVIATION_THRESHOLD
-    ):
-        return reference_rate
-    return raw_rate
+    return reference_rate if reference_rate is not None else 0.0
 
 
 def _align_to_prior_year_weekday(timestamp: pd.Timestamp) -> pd.Timestamp:
     anchor = (timestamp - pd.DateOffset(years=1)).normalize()
     weekday_delta = ((timestamp.weekday() - anchor.weekday() + 3) % 7) - 3
     return anchor + pd.Timedelta(days=weekday_delta)
+
+
+def _align_daily_ratio_date(
+    timestamp: pd.Timestamp,
+    context: pd.DataFrame,
+) -> tuple[pd.Timestamp, str]:
+    """Choose a daily-ratio reference date, preferring matching holiday codes."""
+
+    weekday_aligned = _align_to_prior_year_weekday(timestamp)
+    holiday_column = _holiday_column(context)
+    holiday_code = _holiday_code(context, timestamp, holiday_column)
+    if holiday_column is None or holiday_code is None:
+        return weekday_aligned, "去年对齐日日环比"
+
+    for years_back in (1, 2):
+        candidate_year = timestamp.year - years_back
+        matches = _holiday_dates(
+            context,
+            holiday_column=holiday_column,
+            year=candidate_year,
+            holiday_code=holiday_code,
+        )
+        if matches:
+            label = "去年同假期日环比" if years_back == 1 else "前年同假期日环比"
+            return _nearest_date(matches, timestamp - pd.DateOffset(years=years_back)), label
+
+    day_number = _holiday_day_number(holiday_code)
+    if day_number is not None:
+        prior_year_holidays = [
+            date
+            for date in context.index
+            if date.year == timestamp.year - 1
+            and _holiday_day_number(_holiday_code(context, date, holiday_column)) == day_number
+        ]
+        if prior_year_holidays:
+            return (
+                _nearest_date(prior_year_holidays, timestamp - pd.DateOffset(years=1)),
+                "去年最近同假期天数日环比",
+            )
+
+    return weekday_aligned, "去年对齐日日环比"
+
+
+def _holiday_column(context: pd.DataFrame) -> str | None:
+    return next(
+        (
+            str(column)
+            for column in context.columns
+            if any(token in str(column).lower() for token in HOLIDAY_COLUMN_TOKENS)
+        ),
+        None,
+    )
+
+
+def _holiday_code(
+    context: pd.DataFrame,
+    timestamp: pd.Timestamp,
+    holiday_column: str | None,
+) -> str | None:
+    if holiday_column is None or timestamp not in context.index:
+        return None
+    value = context.loc[timestamp].get(holiday_column)
+    if pd.isna(value):
+        return None
+    code = str(value).strip()
+    return None if not code or code.casefold() == "none" else code
+
+
+def _holiday_dates(
+    context: pd.DataFrame,
+    *,
+    holiday_column: str,
+    year: int,
+    holiday_code: str,
+) -> list[pd.Timestamp]:
+    return [
+        date
+        for date in context.index
+        if date.year == year and _holiday_code(context, date, holiday_column) == holiday_code
+    ]
+
+
+def _holiday_day_number(holiday_code: str | None) -> int | None:
+    if holiday_code is None:
+        return None
+    match = re.search(r"(\d+)$", holiday_code)
+    return int(match.group(1)) if match else None
+
+
+def _nearest_date(dates: list[pd.Timestamp], target: pd.Timestamp) -> pd.Timestamp:
+    return min(dates, key=lambda date: (abs((date - target).days), date))
 
 
 def _weekly_ratio(

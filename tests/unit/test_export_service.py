@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from src.core.constants import PREDICTION_PROVENANCE_COLUMNS
-from src.services.export_service import prepare_export_frames
+from src.services.export_service import prepare_backtest_export_frames, prepare_export_frames
 
 
 def test_prepare_export_frames_uses_original_column_names_and_latest_window() -> None:
@@ -81,3 +81,48 @@ def test_prepare_export_frames_uses_original_column_names_and_latest_window() ->
     assert deviation.loc[0, "实际采用环比"] == 0.1
     assert future_export.loc[0, "预测依据"] == "前一周值 × 去年周环比"
     assert future_export.loc[0, "实际采用环比"] == 0.1
+
+
+def test_prepare_backtest_export_frames_returns_w1_w2_w3_with_same_layout() -> None:
+    normalized = pd.DataFrame(
+        {
+            "item_id": ["north"] * 3,
+            "timestamp": pd.to_datetime(["2026-01-01", "2026-01-02", "2026-01-03"]),
+            "区域": ["北区"] * 3,
+        }
+    )
+    backtest = pd.DataFrame(
+        {
+            "item_id": ["north"] * 3,
+            "timestamp": pd.to_datetime(["2026-01-03", "2026-01-02", "2026-01-01"]),
+            "window_id": ["W1", "W2", "W3"],
+            "model": ["XGBoost"] * 3,
+            "actual": [120.0, 110.0, 100.0],
+            "forecast_p50": [118.0, 108.0, 102.0],
+            "error_rate": [-0.017, -0.018, 0.02],
+        }
+    )
+    future = pd.DataFrame(
+        {
+            "item_id": ["north"],
+            "timestamp": pd.to_datetime(["2026-02-01"]),
+            "forecast_p50": [125.0],
+        }
+    )
+
+    windows, future_export = prepare_backtest_export_frames(
+        normalized_data=normalized,
+        backtest_predictions=backtest,
+        future_forecast=future,
+        best_model="XGBoost",
+        config={"timestamp_column": "日期", "target_column": "GMV", "item_columns": ["区域"]},
+    )
+
+    assert list(windows) == ["W1", "W2", "W3"]
+    assert all(frame.shape[0] == 1 for frame in windows.values())
+    assert windows["W1"].columns.tolist() == windows["W2"].columns.tolist()
+    assert windows["W2"].columns.tolist() == windows["W3"].columns.tolist()
+    assert windows["W1"].iloc[0]["GMV"] == 120.0
+    assert windows["W2"].iloc[0]["GMV"] == 110.0
+    assert windows["W3"].iloc[0]["GMV"] == 100.0
+    assert future_export.iloc[0]["GMV预测值"] == 125.0

@@ -20,10 +20,11 @@ def page_header(title: str, subtitle: str, badge: str | None = None) -> None:
     badge_html = f' <span class="fl-badge fl-badge-success">{badge}</span>' if badge else ""
     st.markdown(
         f"""
-        <div style="display:flex;justify-content:space-between;gap:24px;align-items:flex-start;margin-bottom:18px;">
+        <div class="fl-page-header">
           <div>
-            <h1 style="font-size:28px;line-height:1.25;margin:0;">{title}{badge_html}</h1>
-            <div style="color:#667085;margin-top:8px;line-height:1.55;">{subtitle}</div>
+            <div class="fl-page-kicker">Forecast Lab</div>
+            <h1 class="fl-page-title">{title}{badge_html}</h1>
+            <div class="fl-page-subtitle">{subtitle}</div>
           </div>
         </div>
         """,

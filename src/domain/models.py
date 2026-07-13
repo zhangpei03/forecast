@@ -55,6 +55,7 @@ class ExperimentConfig:
     random_seed: int = DEFAULT_RANDOM_SEED
     duplicate_strategy: str = "sum"
     missing_strategy: str = "block"
+    num_workers: int | None = None
 
 
 @dataclass(frozen=True)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -17,6 +18,21 @@ class AutoGluonUnavailableError(RuntimeError):
     pass
 
 
+def _configure_parallelism(num_workers: int | None) -> int:
+    """Set PyTorch threads and return effective worker count for this machine."""
+    try:
+        import torch
+    except ImportError:
+        torch = None
+    cpu_count = os.cpu_count() or 4
+    if num_workers is None:
+        num_workers = min(cpu_count, 4)
+    if torch is not None:
+        torch.set_num_threads(num_workers)
+    os.environ.setdefault("OMP_NUM_THREADS", str(num_workers))
+    return num_workers
+
+
 def generate_autogluon_backtest_predictions(
     *,
     data: pd.DataFrame,
@@ -28,6 +44,7 @@ def generate_autogluon_backtest_predictions(
     selected_models = _normalize_model_names(
         selected_models if selected_models is not None else ([selected_model] if selected_model else None)
     )
+    num_workers = _configure_parallelism(config.num_workers)
     try:
         from autogluon.timeseries import TimeSeriesDataFrame, TimeSeriesPredictor
     except ImportError as exc:
@@ -76,6 +93,7 @@ def generate_autogluon_backtest_predictions(
             time_limit=max(120, int(config.time_limit_seconds / max(config.num_val_windows, 1))),
             random_seed=config.random_seed,
             enable_ensemble=selected_models is None,
+            num_workers=num_workers,
         )
         future_covariates = None
         if known_covariates:
@@ -92,6 +110,7 @@ def generate_autogluon_backtest_predictions(
             predict_kwargs = {"known_covariates": future_covariates}
             if internal_model_name is not None:
                 predict_kwargs["model"] = internal_model_name
+            predict_kwargs["num_workers"] = num_workers
             raw_predictions = predictor.predict(train_ts, **predict_kwargs)
             frames.append(
                 _format_autogluon_predictions(
@@ -115,6 +134,7 @@ def generate_autogluon_future_forecast(
 ) -> pd.DataFrame:
     selected_model = _normalize_model_name(selected_model)
     model_name = _normalize_model_name(model_name) or ""
+    num_workers = _configure_parallelism(config.num_workers)
     try:
         from autogluon.timeseries import TimeSeriesDataFrame, TimeSeriesPredictor
     except ImportError as exc:
@@ -148,6 +168,7 @@ def generate_autogluon_future_forecast(
         time_limit=config.time_limit_seconds,
         random_seed=config.random_seed,
         enable_ensemble=selected_model is None,
+        num_workers=num_workers,
     )
     model_for_prediction = None if selected_model or model_name in {"", "AutoGluon"} else model_name
     future_covariates = None
@@ -167,6 +188,7 @@ def generate_autogluon_future_forecast(
     raw_predictions = predictor.predict(
         train_ts,
         known_covariates=future_covariates,
+        num_workers=num_workers,
         model=model_for_prediction,
     )
     future = raw_predictions.reset_index()
