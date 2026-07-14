@@ -72,7 +72,10 @@ BASELINE_MODEL_NAMES = (
     "WoW",
     "MTD Daily Avg",
     "YoY Weekday WoW",
-    "YoY Weekday DoD",
+    "YoY Weekday DoD (Holiday)",
+    "YoY Weekday DoD (Weekday Only)",
+    "YoY Weekday DoD (Anchor v1)",
+    "YoY Weekday DoD (Anchor v2)",
 )
 
 CUSTOM_MODEL_NAMES = ("AutoARIMA", "Prophet", "XGBoost")
@@ -119,9 +122,21 @@ MODEL_CATALOG = {
         "业务基线",
         "按去年同星期的周环比推演，并在比例异常时使用相邻同星期参考值修正。",
     ),
-    (MODEL_FAMILY_BASELINE, "YoY Weekday DoD"): (
+    (MODEL_FAMILY_BASELINE, "YoY Weekday DoD (Holiday)"): (
         "业务基线",
-        "按去年同星期的日变化率推演，并在变化率异常时使用相邻同星期参考值修正。",
+        "按去年同星期日环比推演；特殊假期时按相同假期代码对齐。",
+    ),
+    (MODEL_FAMILY_BASELINE, "YoY Weekday DoD (Weekday Only)"): (
+        "业务基线",
+        "只按去年同星期日环比推演，不使用特殊假期对齐。",
+    ),
+    (MODEL_FAMILY_BASELINE, "YoY Weekday DoD (Anchor v1)"): (
+        "业务基线",
+        "保留特殊假期日环比对齐，并将递推结果与去年同期水平锚点融合，抑制长窗口误差累积。",
+    ),
+    (MODEL_FAMILY_BASELINE, "YoY Weekday DoD (Anchor v2)"): (
+        "业务基线",
+        "按近期历史表现自适应融合日环比递推与年度水平锚点，分别处理特殊假期、假期后和普通日期。",
     ),
     (MODEL_FAMILY_CUSTOM, "AutoARIMA"): (
         "统计模型",

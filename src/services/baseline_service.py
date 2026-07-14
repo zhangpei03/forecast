@@ -13,14 +13,35 @@ from src.core.constants import (
 )
 
 YOY_WEEKDAY_WOW_MODEL = "YoY Weekday WoW"
-YOY_WEEKDAY_DOD_MODEL = "YoY Weekday DoD"
+YOY_WEEKDAY_DOD_MODEL = "YoY Weekday DoD (Holiday)"
+DOD2_MODEL = "YoY Weekday DoD (Weekday Only)"
+YOY_WEEKDAY_DOD_ANCHOR_MODEL = "YoY Weekday DoD (Anchor v1)"
+YOY_WEEKDAY_DOD_ANCHOR_V2_MODEL = "YoY Weekday DoD (Anchor v2)"
+LEGACY_DOD_MODEL_ALIASES = {
+    "YoY Weekday DoD": YOY_WEEKDAY_DOD_MODEL,
+    "DoD2": DOD2_MODEL,
+    "YoY Weekday DoD Anchor": YOY_WEEKDAY_DOD_ANCHOR_MODEL,
+    "YoY Weekday DoD Anchor v2": YOY_WEEKDAY_DOD_ANCHOR_V2_MODEL,
+}
 BASELINE_MODELS = BASELINE_MODEL_NAMES
 
 YOY_LAG = {"M": 12, "W": 52, "D": 365}
 WOW_LAG = {"M": 1, "W": 1, "D": 7}
 YOY_RATIO_SEARCH_WEEKS = 4
+YOY_LEVEL_SCALE_LOOKBACK_DAYS = 28
+DOD_ANCHOR_HOLIDAY_RECURSIVE_WEIGHT = 0.60
+DOD_ANCHOR_POST_HOLIDAY_RECURSIVE_WEIGHT = 0.70
+DOD_ANCHOR_WEEKLY_RECURSIVE_WEIGHT = 0.80
+DOD_ANCHOR_POST_HOLIDAY_DAYS = 3
+ANCHOR_V2_WEIGHT_LOOKBACK_DAYS = 56
+ANCHOR_V2_WEIGHT_PRIOR_STRENGTH = 14
+ANCHOR_V2_DEFAULT_RECURSIVE_WEIGHTS = {
+    "holiday": 0.30,
+    "post_holiday": 0.20,
+    "normal": 0.50,
+}
 WEATHER_COLUMN_TOKENS = ("天气", "雨雪", "weather", "rain", "snow")
-HOLIDAY_COLUMN_TOKENS = ("节假日", "假期", "holiday")
+HOLIDAY_COLUMN_TOKENS = ("特殊假期",)
 
 
 def generate_baseline_backtest_predictions(
@@ -35,7 +56,9 @@ def generate_baseline_backtest_predictions(
     clean_data["timestamp"] = pd.to_datetime(clean_data["timestamp"])
     clean_data = clean_data.sort_values(["item_id", "timestamp"])
     frames: list[pd.DataFrame] = []
-    selected_models = tuple(models or _baseline_models_for_freq(freq))
+    selected_models = tuple(
+        _canonical_baseline_model(model) for model in (models or _baseline_models_for_freq(freq))
+    )
 
     for item_id, series in clean_data.groupby("item_id", sort=True):
         series = series.sort_values("timestamp").reset_index(drop=True)
@@ -69,8 +92,16 @@ def _baseline_models_for_freq(freq: str) -> tuple[str, ...]:
             "MTD Daily Avg",
             YOY_WEEKDAY_WOW_MODEL,
             YOY_WEEKDAY_DOD_MODEL,
+            YOY_WEEKDAY_DOD_ANCHOR_MODEL,
+            YOY_WEEKDAY_DOD_ANCHOR_V2_MODEL,
+            DOD2_MODEL,
         )
     return common
+
+
+def _canonical_baseline_model(model: str) -> str:
+    """Accept previous DoD labels while emitting the standardized model name."""
+    return LEGACY_DOD_MODEL_ALIASES.get(model, model)
 
 
 def _predict_baseline_model(
@@ -97,6 +128,12 @@ def _predict_baseline_model(
         return _predict_yoy_weekday_wow_original(item_id, actual, train, window_index)
     if model == YOY_WEEKDAY_DOD_MODEL and freq == "D":
         return _predict_yoy_weekday_dod(item_id, actual, train, window_index)
+    if model == YOY_WEEKDAY_DOD_ANCHOR_MODEL and freq == "D":
+        return _predict_yoy_weekday_dod_anchor(item_id, actual, train, window_index)
+    if model == YOY_WEEKDAY_DOD_ANCHOR_V2_MODEL and freq == "D":
+        return _predict_yoy_weekday_dod_anchor_v2(item_id, actual, train, window_index)
+    if model == DOD2_MODEL and freq == "D":
+        return _predict_dod2(item_id, actual, train, window_index)
     return None
 
 
@@ -107,6 +144,7 @@ def generate_baseline_future_forecast(
     prediction_length: int,
     model: str,
 ) -> pd.DataFrame:
+    model = _canonical_baseline_model(model)
     source_data = data.dropna(subset=["item_id", "timestamp"]).copy()
     source_data["timestamp"] = pd.to_datetime(source_data["timestamp"])
     source_data = source_data.sort_values(["item_id", "timestamp"])
@@ -159,6 +197,23 @@ def generate_baseline_future_forecast(
                 history=series,
                 target_dates=future_dates,
                 context=context,
+            )
+        elif model == YOY_WEEKDAY_DOD_ANCHOR_MODEL:
+            forecasts, provenance = _yoy_weekday_dod_anchor_forecasts(
+                history=series,
+                target_dates=future_dates,
+                context=context,
+            )
+        elif model == YOY_WEEKDAY_DOD_ANCHOR_V2_MODEL:
+            forecasts, provenance = _yoy_weekday_dod_anchor_v2_forecasts(
+                history=series,
+                target_dates=future_dates,
+                context=context,
+            )
+        elif model == DOD2_MODEL:
+            forecasts, provenance = _dod2_forecasts(
+                history=series,
+                target_dates=future_dates,
             )
         else:
             window = ROLLING_MEAN_WINDOW[freq]
@@ -313,6 +368,68 @@ def _predict_yoy_weekday_dod(
     )
 
 
+def _predict_dod2(
+    item_id: str,
+    actual: pd.DataFrame,
+    train: pd.DataFrame,
+    window_index: int,
+) -> pd.DataFrame:
+    forecasts, provenance = _dod2_forecasts(
+        history=train,
+        target_dates=pd.DatetimeIndex(pd.to_datetime(actual["timestamp"])),
+    )
+    return _prediction_frame(
+        DOD2_MODEL,
+        item_id,
+        actual,
+        forecasts,
+        window_index,
+        provenance=provenance,
+    )
+
+
+def _predict_yoy_weekday_dod_anchor(
+    item_id: str,
+    actual: pd.DataFrame,
+    train: pd.DataFrame,
+    window_index: int,
+) -> pd.DataFrame:
+    forecasts, provenance = _yoy_weekday_dod_anchor_forecasts(
+        history=train,
+        target_dates=pd.DatetimeIndex(pd.to_datetime(actual["timestamp"])),
+        context=pd.concat([train, actual], ignore_index=True),
+    )
+    return _prediction_frame(
+        YOY_WEEKDAY_DOD_ANCHOR_MODEL,
+        item_id,
+        actual,
+        forecasts,
+        window_index,
+        provenance=provenance,
+    )
+
+
+def _predict_yoy_weekday_dod_anchor_v2(
+    item_id: str,
+    actual: pd.DataFrame,
+    train: pd.DataFrame,
+    window_index: int,
+) -> pd.DataFrame:
+    forecasts, provenance = _yoy_weekday_dod_anchor_v2_forecasts(
+        history=train,
+        target_dates=pd.DatetimeIndex(pd.to_datetime(actual["timestamp"])),
+        context=pd.concat([train, actual], ignore_index=True),
+    )
+    return _prediction_frame(
+        YOY_WEEKDAY_DOD_ANCHOR_V2_MODEL,
+        item_id,
+        actual,
+        forecasts,
+        window_index,
+        provenance=provenance,
+    )
+
+
 def _yoy_weekday_wow_original_forecasts(
     *,
     history: pd.DataFrame,
@@ -422,6 +539,325 @@ def _yoy_weekday_dod_forecasts(
             )
         )
     return forecasts, provenance
+
+
+def _yoy_weekday_dod_anchor_forecasts(
+    *,
+    history: pd.DataFrame,
+    target_dates: pd.DatetimeIndex,
+    context: pd.DataFrame,
+) -> tuple[list[float], list[dict[str, object]]]:
+    """Holiday-aware DoD with independent annual-level anchors to limit drift."""
+    ordered = history.dropna(subset=["timestamp", "target"]).copy()
+    ordered["timestamp"] = pd.to_datetime(ordered["timestamp"]).dt.normalize()
+    ordered = ordered.sort_values("timestamp").drop_duplicates("timestamp", keep="last")
+    values = {
+        timestamp: float(target)
+        for timestamp, target in zip(ordered["timestamp"], ordered["target"], strict=False)
+    }
+    if not values:
+        return [0.0] * len(target_dates), [
+            _empty_provenance("日环比递推与年度水平锚点融合") for _ in target_dates
+        ]
+
+    context_indexed = _prepare_context(context)
+    fallback = float(ordered["target"].iloc[-1])
+    level_scale = _recent_yoy_level_scale(values)
+    forecasts: list[float] = []
+    provenance: list[dict[str, object]] = []
+    for horizon_index, raw_timestamp in enumerate(target_dates):
+        timestamp = pd.Timestamp(raw_timestamp).normalize()
+        base_timestamp = timestamp - pd.Timedelta(days=1)
+        base = values.get(base_timestamp)
+        if base is None or not math.isfinite(base):
+            base = forecasts[-1] if forecasts else fallback
+
+        aligned, ratio_name = _align_daily_ratio_date(timestamp, context_indexed)
+        comparison_timestamp = aligned - pd.Timedelta(days=1)
+        raw_rate = _daily_change_rate(values, aligned)
+        rate = _select_yoy_daily_change_rate(
+            timestamp=timestamp,
+            aligned=aligned,
+            history_values=values,
+            context=context_indexed,
+        )
+        recursive_forecast = float(base * (1.0 + rate))
+        anchor = _annual_level_anchor(values, aligned, level_scale)
+        recursive_weight = _dod_anchor_recursive_weight(
+            timestamp=timestamp,
+            context=context_indexed,
+            horizon_index=horizon_index,
+        )
+        if anchor is None or recursive_weight >= 1.0:
+            forecast = recursive_forecast
+            basis = "前一天值 × 去年日环比"
+            used_ratio_name = ratio_name
+        else:
+            forecast = float(recursive_weight * recursive_forecast + (1.0 - recursive_weight) * anchor)
+            basis = (
+                f"日环比递推 {recursive_weight:.0%} + 年度水平锚点 "
+                f"{1.0 - recursive_weight:.0%}"
+            )
+            used_ratio_name = f"{ratio_name} + 年度水平锚点"
+
+        values[timestamp] = forecast
+        forecasts.append(forecast)
+        provenance.append(
+            _ratio_provenance(
+                basis=basis,
+                base_timestamp=base_timestamp,
+                base_value=base,
+                prior_year_timestamp=aligned,
+                prior_year_value=values.get(aligned),
+                comparison_timestamp=comparison_timestamp,
+                comparison_value=values.get(comparison_timestamp),
+                applied_ratio=rate,
+                raw_ratio=raw_rate,
+                ratio_name=used_ratio_name,
+            )
+        )
+    return forecasts, provenance
+
+
+def _yoy_weekday_dod_anchor_v2_forecasts(
+    *,
+    history: pd.DataFrame,
+    target_dates: pd.DatetimeIndex,
+    context: pd.DataFrame,
+) -> tuple[list[float], list[dict[str, object]]]:
+    """Adaptive DoD/level-anchor blend learned from each series' recent history."""
+    ordered = history.dropna(subset=["timestamp", "target"]).copy()
+    ordered["timestamp"] = pd.to_datetime(ordered["timestamp"]).dt.normalize()
+    ordered = ordered.sort_values("timestamp").drop_duplicates("timestamp", keep="last")
+    values = {
+        timestamp: float(target)
+        for timestamp, target in zip(ordered["timestamp"], ordered["target"], strict=False)
+    }
+    if not values:
+        return [0.0] * len(target_dates), [
+            _empty_provenance("自适应日环比递推与年度水平锚点融合") for _ in target_dates
+        ]
+
+    context_indexed = _prepare_context(context)
+    fallback = float(ordered["target"].iloc[-1])
+    level_scale = _recent_yoy_level_scale(values)
+    recursive_weights = _learn_anchor_v2_recursive_weights(
+        history_values=values,
+        context=context_indexed,
+        level_scale=level_scale,
+    )
+    forecasts: list[float] = []
+    provenance: list[dict[str, object]] = []
+    for raw_timestamp in target_dates:
+        timestamp = pd.Timestamp(raw_timestamp).normalize()
+        base_timestamp = timestamp - pd.Timedelta(days=1)
+        base = values.get(base_timestamp)
+        if base is None or not math.isfinite(base):
+            base = forecasts[-1] if forecasts else fallback
+
+        aligned, ratio_name = _align_daily_ratio_date(timestamp, context_indexed)
+        comparison_timestamp = aligned - pd.Timedelta(days=1)
+        raw_rate = _daily_change_rate(values, aligned)
+        rate = _select_yoy_daily_change_rate(
+            timestamp=timestamp,
+            aligned=aligned,
+            history_values=values,
+            context=context_indexed,
+        )
+        recursive_forecast = float(base * (1.0 + rate))
+        anchor = _annual_level_anchor(values, aligned, level_scale)
+        state = _anchor_v2_state(timestamp, context_indexed)
+        recursive_weight = recursive_weights[state]
+        if anchor is None:
+            forecast = recursive_forecast
+            basis = "前一天值 × 去年日环比"
+            used_ratio_name = ratio_name
+        else:
+            forecast = float(recursive_weight * recursive_forecast + (1.0 - recursive_weight) * anchor)
+            basis = (
+                f"自适应日环比递推 {recursive_weight:.0%} + 年度水平锚点 "
+                f"{1.0 - recursive_weight:.0%}"
+            )
+            used_ratio_name = f"{ratio_name} + 自适应年度水平锚点"
+
+        values[timestamp] = forecast
+        forecasts.append(forecast)
+        provenance.append(
+            _ratio_provenance(
+                basis=basis,
+                base_timestamp=base_timestamp,
+                base_value=base,
+                prior_year_timestamp=aligned,
+                prior_year_value=values.get(aligned),
+                comparison_timestamp=comparison_timestamp,
+                comparison_value=values.get(comparison_timestamp),
+                applied_ratio=rate,
+                raw_ratio=raw_rate,
+                ratio_name=used_ratio_name,
+            )
+        )
+    return forecasts, provenance
+
+
+def _learn_anchor_v2_recursive_weights(
+    *,
+    history_values: dict[pd.Timestamp, float],
+    context: pd.DataFrame,
+    level_scale: float,
+) -> dict[str, float]:
+    """Learn continuous blend weights without a ratio-size trigger or replacement rule."""
+    errors: dict[str, list[tuple[float, float]]] = {
+        state: [] for state in ANCHOR_V2_DEFAULT_RECURSIVE_WEIGHTS
+    }
+    recent_dates = sorted(history_values)[-ANCHOR_V2_WEIGHT_LOOKBACK_DAYS:]
+    for timestamp in recent_dates:
+        actual = history_values[timestamp]
+        previous = history_values.get(timestamp - pd.Timedelta(days=1))
+        if actual == 0 or previous is None or not math.isfinite(actual) or not math.isfinite(previous):
+            continue
+        aligned, _ = _align_daily_ratio_date(timestamp, context)
+        rate = _daily_change_rate(history_values, aligned)
+        anchor = _annual_level_anchor(history_values, aligned, level_scale)
+        if rate is None or anchor is None:
+            continue
+        recursive = previous * (1.0 + rate)
+        if not math.isfinite(recursive):
+            continue
+        state = _anchor_v2_state(timestamp, context)
+        errors[state].append((abs(recursive - actual) / abs(actual), abs(anchor - actual) / abs(actual)))
+
+    weights: dict[str, float] = {}
+    for state, default_weight in ANCHOR_V2_DEFAULT_RECURSIVE_WEIGHTS.items():
+        samples = errors[state]
+        if not samples:
+            weights[state] = default_weight
+            continue
+        recursive_error = float(pd.Series([sample[0] for sample in samples]).median())
+        anchor_error = float(pd.Series([sample[1] for sample in samples]).median())
+        if recursive_error + anchor_error == 0:
+            learned_weight = default_weight
+        else:
+            learned_weight = anchor_error / (recursive_error + anchor_error)
+        sample_count = len(samples)
+        weights[state] = float(
+            (sample_count * learned_weight + ANCHOR_V2_WEIGHT_PRIOR_STRENGTH * default_weight)
+            / (sample_count + ANCHOR_V2_WEIGHT_PRIOR_STRENGTH)
+        )
+    return weights
+
+
+def _anchor_v2_state(timestamp: pd.Timestamp, context: pd.DataFrame) -> str:
+    holiday_column = _special_holiday_column(context)
+    if _holiday_code(context, timestamp, holiday_column) is not None:
+        return "holiday"
+    if any(
+        _holiday_code(context, timestamp - pd.Timedelta(days=offset), holiday_column) is not None
+        for offset in range(1, DOD_ANCHOR_POST_HOLIDAY_DAYS + 1)
+    ):
+        return "post_holiday"
+    return "normal"
+
+
+def _dod2_forecasts(
+    *,
+    history: pd.DataFrame,
+    target_dates: pd.DatetimeIndex,
+) -> tuple[list[float], list[dict[str, object]]]:
+    """Weekday-aligned day-over-day baseline without holiday alignment."""
+
+    ordered = history.dropna(subset=["timestamp", "target"]).copy()
+    ordered["timestamp"] = pd.to_datetime(ordered["timestamp"]).dt.normalize()
+    ordered = ordered.sort_values("timestamp").drop_duplicates("timestamp", keep="last")
+    values = {
+        timestamp: float(target)
+        for timestamp, target in zip(ordered["timestamp"], ordered["target"], strict=False)
+    }
+    if not values:
+        return [0.0] * len(target_dates), [_empty_provenance("前一天值 × 去年同星期日环比") for _ in target_dates]
+
+    fallback = float(ordered["target"].iloc[-1])
+    forecasts: list[float] = []
+    provenance: list[dict[str, object]] = []
+    for raw_timestamp in target_dates:
+        timestamp = pd.Timestamp(raw_timestamp).normalize()
+        base_timestamp = timestamp - pd.Timedelta(days=1)
+        base = values.get(base_timestamp)
+        if base is None or not math.isfinite(base):
+            base = forecasts[-1] if forecasts else fallback
+        aligned = _align_to_prior_year_weekday(timestamp)
+        comparison_timestamp = aligned - pd.Timedelta(days=1)
+        raw_rate = _daily_change_rate(values, aligned)
+        rate = raw_rate if raw_rate is not None else 0.0
+        forecast = float(base * (1.0 + rate))
+        values[timestamp] = forecast
+        forecasts.append(forecast)
+        provenance.append(
+            _ratio_provenance(
+                basis="前一天值 × 去年同星期日环比",
+                base_timestamp=base_timestamp,
+                base_value=base,
+                prior_year_timestamp=aligned,
+                prior_year_value=values.get(aligned),
+                comparison_timestamp=comparison_timestamp,
+                comparison_value=values.get(comparison_timestamp),
+                applied_ratio=rate,
+                raw_ratio=raw_rate,
+                ratio_name="去年同星期日日环比",
+            )
+        )
+    return forecasts, provenance
+
+
+def _recent_yoy_level_scale(history_values: dict[pd.Timestamp, float]) -> float:
+    """Return a robust, non-recursive current-to-prior-year level multiplier."""
+    ratios: list[float] = []
+    for timestamp in sorted(history_values)[-YOY_LEVEL_SCALE_LOOKBACK_DAYS:]:
+        prior_year_value = history_values.get(_align_to_prior_year_weekday(timestamp))
+        current_value = history_values[timestamp]
+        if (
+            prior_year_value is None
+            or prior_year_value == 0
+            or not math.isfinite(current_value)
+            or not math.isfinite(prior_year_value)
+        ):
+            continue
+        ratio = current_value / prior_year_value
+        if math.isfinite(ratio) and ratio >= 0:
+            ratios.append(float(ratio))
+    return float(pd.Series(ratios).median()) if ratios else 1.0
+
+
+def _annual_level_anchor(
+    history_values: dict[pd.Timestamp, float],
+    aligned_timestamp: pd.Timestamp,
+    level_scale: float,
+) -> float | None:
+    reference_value = history_values.get(aligned_timestamp)
+    if reference_value is None or not math.isfinite(reference_value):
+        return None
+    anchor = reference_value * level_scale
+    return float(anchor) if math.isfinite(anchor) else None
+
+
+def _dod_anchor_recursive_weight(
+    *,
+    timestamp: pd.Timestamp,
+    context: pd.DataFrame,
+    horizon_index: int,
+) -> float:
+    """Use stronger anchors for holiday days, their aftermath, and weekly resets."""
+    weight = 1.0
+    holiday_column = _special_holiday_column(context)
+    if _holiday_code(context, timestamp, holiday_column) is not None:
+        weight = DOD_ANCHOR_HOLIDAY_RECURSIVE_WEIGHT
+    elif any(
+        _holiday_code(context, timestamp - pd.Timedelta(days=offset), holiday_column) is not None
+        for offset in range(1, DOD_ANCHOR_POST_HOLIDAY_DAYS + 1)
+    ):
+        weight = DOD_ANCHOR_POST_HOLIDAY_RECURSIVE_WEIGHT
+    if (horizon_index + 1) % 7 == 0:
+        weight = min(weight, DOD_ANCHOR_WEEKLY_RECURSIVE_WEIGHT)
+    return weight
 
 
 def _select_yoy_weekly_ratio(
@@ -561,7 +997,7 @@ def _align_daily_ratio_date(
     """Choose a daily-ratio reference date, preferring matching holiday codes."""
 
     weekday_aligned = _align_to_prior_year_weekday(timestamp)
-    holiday_column = _holiday_column(context)
+    holiday_column = _special_holiday_column(context)
     holiday_code = _holiday_code(context, timestamp, holiday_column)
     if holiday_column is None or holiday_code is None:
         return weekday_aligned, "去年对齐日日环比"
@@ -595,12 +1031,12 @@ def _align_daily_ratio_date(
     return weekday_aligned, "去年对齐日日环比"
 
 
-def _holiday_column(context: pd.DataFrame) -> str | None:
+def _special_holiday_column(context: pd.DataFrame) -> str | None:
     return next(
         (
             str(column)
             for column in context.columns
-            if any(token in str(column).lower() for token in HOLIDAY_COLUMN_TOKENS)
+            if str(column).strip() == "特殊假期"
         ),
         None,
     )
