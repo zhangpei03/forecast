@@ -23,16 +23,17 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 
 # PyPI 源可选地由 build-arg 覆盖; 缺省则复用基础镜像里 pip.conf 配好的内网源
-ARG PIP_INDEX_URL=
+ARG PIP_INDEX_URL=http://artifactory.intra.xiaojukeji.com/artifactory/api/pypi/pypi/simple
+ARG PIP_TRUSTED_HOST=artifactory.intra.xiaojukeji.com
 
 # 内网构建: 解析出可用的 PyPI 源 -> 装 uv -> 去掉够不到的 pytorch-cpu 外网源 -> uv sync
 # 必须放在同一个 RUN: INDEX 这个 shell 变量要从 pip 传递给 uv(uv 不读 pip.conf)
 RUN set -eux; \
     INDEX="${PIP_INDEX_URL:-$(pip config get global.index-url 2>/dev/null || true)}"; \
     echo "Resolved PyPI index: ${INDEX:-<base image default>}"; \
-    pip install --no-cache-dir ${INDEX:+-i "$INDEX"} "uv>=0.5,<1"; \
+    pip install --no-cache-dir --trusted-host "$PIP_TRUSTED_HOST" ${INDEX:+-i "$INDEX"} "uv>=0.5,<1"; \
     sed -i '/^\[tool\.uv\.sources\]/,/^$/d; /^\[\[tool\.uv\.index\]\]/,/^$/d' pyproject.toml; \
-    uv sync --frozen --no-dev ${INDEX:+--default-index "$INDEX"}
+    uv sync --no-dev --allow-insecure-host "$PIP_TRUSTED_HOST" ${INDEX:+--default-index "$INDEX"}
 
 # ── Stage 2: runtime ──
 FROM ${BASE_IMAGE}

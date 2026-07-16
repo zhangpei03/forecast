@@ -25,6 +25,8 @@ dependencies = [
   "uvicorn>=0.30,<1",
   "httpx>=0.27,<1",
   "torch>=2,<3",
+  "didi-sso-fastapi==1.0.0",
+  "websockets",
 ]
 
 [dependency-groups]
