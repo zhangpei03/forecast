@@ -40,6 +40,7 @@ dev = [
 # (无 GPU 的 OE 部署用不上 CUDA, 镜像可从 ~6GB 降到 ~2GB)。
 # mac/arm 本来就是 CPU wheel, 此源主要影响 linux 容器构建。
 [tool.uv.sources]
+didi-sso-fastapi = { path = "vendor/didi_sso_fastapi-1.0.0-py3-none-any.whl" }
 torch = [{ index = "pytorch-cpu" }]
 
 [[tool.uv.index]]

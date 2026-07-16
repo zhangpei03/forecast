@@ -10,6 +10,7 @@ import importlib.util
 import sys
 import types
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 from fastapi import APIRouter
 
@@ -98,3 +99,36 @@ def test_user_header_uses_didi_sso_context(monkeypatch) -> None:
     monkeypatch.setattr(sidecar, "get_user", lambda: _FakeUser("ZhangSan", "Zhang San"))
 
     assert sidecar._get_user_ldap() == "zhangsan"
+
+
+def test_login_url_uses_callback_target_without_leaking_app_key(monkeypatch) -> None:
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://forecast.intra.xiaojukeji.com")
+    sidecar = _load_sidecar(monkeypatch)
+
+    login_url = sidecar._sso_login_url("https://forecast.intra.xiaojukeji.com/report?id=1")
+    login_query = parse_qs(urlsplit(login_url).query)
+
+    assert login_query["app_id"] == ["forecast-app"]
+    assert "app_key" not in login_query
+    assert login_query["jumpto"] == [
+        "https://forecast.intra.xiaojukeji.com/sso/callback?"
+        "jumpto=https%3A%2F%2Fforecast.intra.xiaojukeji.com%2Freport%3Fid%3D1"
+    ]
+
+
+def test_login_url_unwraps_nested_callback_targets(monkeypatch) -> None:
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://forecast.intra.xiaojukeji.com")
+    sidecar = _load_sidecar(monkeypatch)
+
+    nested = (
+        "https://forecast.intra.xiaojukeji.com/sso/callback?jumpto="
+        "https%3A%2F%2Fforecast.intra.xiaojukeji.com%2Fsso%2Fcallback%3Fjumpto%3D"
+        "https%253A%252F%252Fforecast.intra.xiaojukeji.com%252F"
+    )
+    login_url = sidecar._sso_login_url(nested)
+    login_query = parse_qs(urlsplit(login_url).query)
+
+    assert login_query["jumpto"] == [
+        "https://forecast.intra.xiaojukeji.com/sso/callback?"
+        "jumpto=https%3A%2F%2Fforecast.intra.xiaojukeji.com%2F"
+    ]

@@ -7,8 +7,10 @@ an authenticated request and exposes the LDAP to Streamlit as ``X-SSO-User``.
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import os
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qs, urlencode, urljoin, urlsplit, urlunsplit
 
 import httpx
 import websockets
@@ -27,6 +29,7 @@ from didi_sso import (
 )
 
 load_dotenv(override=False)
+logger = logging.getLogger("forecast_sso_sidecar")
 
 
 def _env(key: str, default: str = "") -> str:
@@ -55,6 +58,8 @@ MCP_APP_ID = _env("MCP_APP_ID")
 MCP_SECRET_KEY = _env("MCP_SECRET_KEY")
 APP_ENV = _env("APP_ENV", "prod")
 STREAMLIT_URL = _env("STREAMLIT_URL", "http://127.0.0.1:8501")
+PUBLIC_BASE_URL = _env("PUBLIC_BASE_URL").rstrip("/")
+SSO_CALLBACK_PATH = "/sso/callback"
 
 sso_service = SsoService(
     app_id=SSO_APP_ID,
@@ -70,6 +75,16 @@ sso_service = SsoService(
     upm_check_user_ticket_path=UPM_CHECK_USER_TICKET_PATH,
 )
 
+def _sso_login_url(jump_to: str = "") -> str:
+    """Build a browser login URL compatible with the SSO gateway."""
+    params = {"app_id": SSO_APP_ID, "version": "1.0"}
+    if jump_to:
+        params["jumpto"] = _callback_jump_to(jump_to)
+    return f"{SSO_HOST}{SSO_LOGIN_PATH}?{urlencode(params)}"
+
+
+sso_service.get_login_url = _sso_login_url
+
 mcp_auth = McpAuthService(mcp_app_id=MCP_APP_ID, mcp_secret_key=MCP_SECRET_KEY)
 
 default_user = (
@@ -81,9 +96,49 @@ default_user = (
 
 def _public_request_url(request: Request) -> str:
     """Build the externally visible URL for SSO's post-login redirect."""
+    if PUBLIC_BASE_URL:
+        public = urlsplit(PUBLIC_BASE_URL)
+        return urlunsplit((public.scheme, public.netloc, request.url.path, request.url.query, ""))
     scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
-    host = request.headers.get("host", request.url.netloc)
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host", request.url.netloc)
     return urlunsplit((scheme, host, request.url.path, request.url.query, ""))
+
+
+def _unwrap_callback_jump_to(jump_to: str) -> str:
+    """Avoid recursively using the SSO callback URL as the next login target."""
+    current = jump_to
+    for _ in range(5):
+        parsed = urlsplit(current)
+        if parsed.path != SSO_CALLBACK_PATH:
+            return current
+        nested = parse_qs(parsed.query).get("jumpto", [""])[0]
+        if not nested or nested == current:
+            break
+        current = nested
+    return "/"
+
+
+def _public_base_from_target(target: str) -> str:
+    """Return the externally visible origin used to build the SSO callback URL."""
+    if PUBLIC_BASE_URL:
+        return PUBLIC_BASE_URL
+    parsed = urlsplit(target)
+    if parsed.scheme and parsed.netloc:
+        return urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+    return ""
+
+
+def _callback_jump_to(jump_to: str) -> str:
+    """Wrap the original target in our callback so UPM can match the callback URL.
+
+    UPM matches the login ``jumpto`` after stripping query parameters. Therefore
+    the SSO-facing target must be ``/sso/callback``; the real page is carried as
+    the callback's own ``jumpto`` parameter.
+    """
+    target = _unwrap_callback_jump_to(jump_to)
+    base_url = _public_base_from_target(target).rstrip("/")
+    callback_url = f"{base_url}{SSO_CALLBACK_PATH}" if base_url else SSO_CALLBACK_PATH
+    return f"{callback_url}?{urlencode({'jumpto': target})}"
 
 
 class BrowserLoginRedirectMiddleware(BaseHTTPMiddleware):
@@ -96,7 +151,12 @@ class BrowserLoginRedirectMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
         response = await call_next(request)
         accepts_html = "text/html" in request.headers.get("accept", "")
-        if request.method in {"GET", "HEAD"} and response.status_code == 401 and accepts_html:
+        if (
+            request.url.path != SSO_CALLBACK_PATH
+            and request.method in {"GET", "HEAD"}
+            and response.status_code == 401
+            and accepts_html
+        ):
             return RedirectResponse(
                 url=self.sso_service.get_login_url(_public_request_url(request)),
                 status_code=302,
@@ -106,13 +166,101 @@ class BrowserLoginRedirectMiddleware(BaseHTTPMiddleware):
 
 app = FastAPI(title="forecast-sso-sidecar")
 
+
+async def _callback_params(request: Request) -> dict[str, str]:
+    """Read callback parameters from query, form-encoded, or JSON requests."""
+    params = {key: value for key, value in request.query_params.items()}
+    if request.method in {"GET", "HEAD"}:
+        return params
+
+    body = await request.body()
+    if not body:
+        return params
+
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except json.JSONDecodeError:
+            return params
+        if isinstance(payload, dict):
+            params.update({str(key): str(value) for key, value in payload.items()})
+        return params
+
+    for key, values in parse_qs(body.decode("utf-8")).items():
+        if values:
+            params[key] = values[-1]
+    return params
+
+
+def _log_callback_state(request: Request, params: dict[str, str], stage: str) -> None:
+    """Log callback diagnostics without leaking ticket/code/token values."""
+    interesting = ["code", "ticket", "token", "access_token", "jumpto"]
+    present = [key for key in interesting if params.get(key)]
+    logger.warning(
+        "sso_callback stage=%s method=%s path=%s keys=%s present=%s content_type=%s",
+        stage,
+        request.method,
+        request.url.path,
+        sorted(params.keys()),
+        present,
+        request.headers.get("content-type", ""),
+    )
+
+
+@app.api_route(SSO_CALLBACK_PATH, methods=["GET", "POST"])
+async def sso_callback(request: Request) -> Response:
+    """Accept Stargate callback credentials and write the local ticket cookie."""
+    params = await _callback_params(request)
+    _log_callback_state(request, params, "received")
+    jump_to = params.get("jumpto") or "/"
+
+    ticket = params.get("ticket") or params.get("token") or params.get("access_token") or ""
+    code = params.get("code")
+    if code:
+        data = await sso_service.check_code(code)
+        ticket = data.get("ticket", "") if data else ""
+        if not ticket:
+            _log_callback_state(request, params, "check_code_failed")
+
+    if ticket:
+        user = await sso_service.get_user_info(ticket)
+        if user:
+            _log_callback_state(request, params, "authenticated")
+            response = RedirectResponse(url=jump_to, status_code=302)
+            sso_service.set_ticket_cookie(response, ticket)
+            return response
+        _log_callback_state(request, params, "get_user_info_failed")
+
+    _log_callback_state(request, params, "missing_or_invalid_credentials")
+    return Response("SSO callback did not include a valid code or ticket.", status_code=401)
+
+
+@app.get("/sso/debug-cookie")
+async def debug_sso_cookie(request: Request) -> dict[str, object]:
+    """Report whether the browser is sending the local SSO cookie."""
+    cookie_name = sso_service._ticket_cookie_name()
+    return {
+        "cookie_name": cookie_name,
+        "has_cookie": bool(request.cookies.get(cookie_name)),
+        "all_cookie_names": sorted(request.cookies.keys()),
+    }
+
+
+@app.get("/sso/debug-login-url")
+async def debug_login_url(request: Request) -> dict[str, str]:
+    """Report the login URL shape without exposing secrets."""
+    public_url = _public_request_url(request)
+    return {"public_url": public_url, "login_url": sso_service.get_login_url(public_url)}
+
+
 app.add_middleware(
     SsoMiddleware,
     sso_service=sso_service,
     mcp_auth=mcp_auth,
     enabled=SSO_ENABLED,
     default_user=default_user,
-    skip_paths=frozenset(["/health", "/openapi.json", "/docs", "/redoc"]),
+    skip_paths=frozenset(["/health", SSO_CALLBACK_PATH, "/openapi.json", "/docs", "/redoc"]),
 )
 # Add after SsoMiddleware: Starlette executes the latest registered middleware first,
 # so this outer layer can convert didi_sso's browser 401 response into a redirect.

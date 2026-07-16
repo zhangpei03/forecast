@@ -20,7 +20,7 @@
  done
  
  # 拷贝目录(排除 __pycache__ 和 .pyc)
- for d in src pages deploy scripts runtime sample_data .streamlit config; do
+ for d in src pages deploy scripts runtime sample_data .streamlit config vendor; do
    if [ -d "$d" ]; then
      mkdir -p "output/$d"
      find "$d" -type f ! -name '*.pyc' ! -path '*__pycache__*' -exec cp --parents {} output/ \;

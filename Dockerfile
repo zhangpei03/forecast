@@ -21,6 +21,7 @@ ENV UV_LINK_MODE=copy \
 
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
+COPY vendor ./vendor
 
 # PyPI 源可选地由 build-arg 覆盖; 缺省则复用基础镜像里 pip.conf 配好的内网源
 ARG PIP_INDEX_URL=http://artifactory.intra.xiaojukeji.com/artifactory/api/pypi/pypi/simple
@@ -32,7 +33,7 @@ RUN set -eux; \
     INDEX="${PIP_INDEX_URL:-$(pip config get global.index-url 2>/dev/null || true)}"; \
     echo "Resolved PyPI index: ${INDEX:-<base image default>}"; \
     pip install --no-cache-dir --trusted-host "$PIP_TRUSTED_HOST" ${INDEX:+-i "$INDEX"} "uv>=0.5,<1"; \
-    sed -i '/^\[tool\.uv\.sources\]/,/^$/d; /^\[\[tool\.uv\.index\]\]/,/^$/d' pyproject.toml; \
+    sed -i '/^torch = /d; /^\[\[tool\.uv\.index\]\]/,/^$/d' pyproject.toml; \
     uv sync --no-dev --allow-insecure-host "$PIP_TRUSTED_HOST" ${INDEX:+--default-index "$INDEX"}
 
 # ── Stage 2: runtime ──
@@ -45,7 +46,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
-    FORECAST_LAB_RUNTIME_DIR=/data
+    FORECAST_LAB_RUNTIME_DIR=/data \
+    APP_ENV=prod \
+    SSO_ENABLED=true \
+    SSO_APP_ID=2102571 \
+    SSO_HOST=https://mis.diditaxi.com.cn \
+    PUBLIC_BASE_URL=https://forecast.intra.xiaojukeji.com \
+    SSO_DOMAIN= \
+    SSO_LOGIN_PATH=/auth/sso/login \
+    SSO_LOGOUT_PATH=/auth/ldap/logout \
+    SSO_CHECK_TICKET_PATH=/auth/sso/api/check_ticket \
+    SSO_CHECK_CODE_PATH=/auth/sso/api/check_code \
+    SSO_USER_INDEX_PATH=/auth/api/user/index \
+    UPM_CHECK_USER_TICKET_PATH=/auth/sso/api/get_user_by_ticket \
+    SSO_MOCK=false
 
 WORKDIR /app
 COPY . /app
