@@ -16,10 +16,17 @@ from fastapi import APIRouter
 
 
 class _FakeSsoService:
-    init_kwargs: dict[str, object]
-
-    def __init__(self, **kwargs: object) -> None:
-        type(self).init_kwargs = kwargs
+     init_kwargs: dict[str, object]
+ 
+     def __init__(self, **kwargs: object) -> None:
+         type(self).init_kwargs = kwargs
+ 
+     def get_login_url(self, jump_to: str = "") -> str:
+         from urllib.parse import quote
+         params = f"app_id={self.init_kwargs['app_id']}&version=1.0"
+         if jump_to:
+             params += f"&jumpto={quote(jump_to, safe='')}"
+         return f"{self.init_kwargs['sso_host']}/auth/sso/login?{params}"
 
 
 class _FakeMcpAuthService:
@@ -101,30 +108,15 @@ def test_user_header_uses_didi_sso_context(monkeypatch) -> None:
     assert sidecar._get_user_ldap() == "zhangsan"
 
 
-def test_login_url_uses_callback_path(monkeypatch) -> None:
+def test_login_url_passes_target_as_jumpto(monkeypatch) -> None:
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://forecast.intra.xiaojukeji.com")
     sidecar = _load_sidecar(monkeypatch)
 
-    login_url = sidecar._sso_login_url("https://forecast.intra.xiaojukeji.com/report?id=1")
+    target = "https://forecast.intra.xiaojukeji.com/report?id=1"
+    login_url = sidecar.sso_service.get_login_url(target)
     login_query = parse_qs(urlsplit(login_url).query)
 
     assert login_query["app_id"] == ["forecast-app"]
     assert "app_key" not in login_query
-    # jumpto is the bare callback URL — SSO gateway matches it and generates code
-    jumpto = login_query["jumpto"][0]
-    assert jumpto == "https://forecast.intra.xiaojukeji.com/sso/callback"
-    # No nested jumpto wrapping
-    assert "jumpto" not in parse_qs(urlsplit(jumpto).query)
-
-
-def test_login_url_ignores_nested_callback(monkeypatch) -> None:
-    monkeypatch.setenv("PUBLIC_BASE_URL", "https://forecast.intra.xiaojukeji.com")
-    sidecar = _load_sidecar(monkeypatch)
-
-    # jumpto is always the bare callback URL, regardless of the input target
-    target = "https://forecast.intra.xiaojukeji.com/sso/callback?jumpto=https://forecast.intra.xiaojukeji.com/"
-    login_url = sidecar._sso_login_url(target)
-    login_query = parse_qs(urlsplit(login_url).query)
-
-    jumpto = login_query["jumpto"][0]
-    assert jumpto == "https://forecast.intra.xiaojukeji.com/sso/callback"
+    # jumpto is the final destination — SSO gateway preserves it in callback redirect
+    assert login_query["jumpto"] == [target]

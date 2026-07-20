@@ -7,10 +7,9 @@ an authenticated request and exposes the LDAP to Streamlit as ``X-SSO-User``.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
-from urllib.parse import parse_qs, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 import websockets
@@ -75,24 +74,6 @@ sso_service = SsoService(
     upm_check_user_ticket_path=UPM_CHECK_USER_TICKET_PATH,
 )
 
-def _sso_login_url(jump_to: str = "") -> str:
-    """Build a browser login URL compatible with the SSO gateway.
-
-    The ``jumpto`` is the registered callback path (``/sso/callback``).
-    The SSO gateway matches it against registered callbacks and generates
-    a ``code`` parameter on redirect.
-    The original target page is stashed in a short-lived cookie so the
-    callback handler can redirect there after code exchange.
-    """
-    params = {"app_id": SSO_APP_ID, "version": "1.0"}
-    if jump_to:
-        callback = f"{PUBLIC_BASE_URL}{SSO_CALLBACK_PATH}" if PUBLIC_BASE_URL else SSO_CALLBACK_PATH
-        params["jumpto"] = callback
-    return f"{SSO_HOST}{SSO_LOGIN_PATH}?{urlencode(params)}"
-
-
-sso_service.get_login_url = _sso_login_url
-
 mcp_auth = McpAuthService(mcp_app_id=MCP_APP_ID, mcp_secret_key=MCP_SECRET_KEY)
 
 default_user = (
@@ -111,46 +92,6 @@ def _public_request_url(request: Request) -> str:
     host = request.headers.get("x-forwarded-host") or request.headers.get("host", request.url.netloc)
     return urlunsplit((scheme, host, request.url.path, request.url.query, ""))
 
-
-def _unwrap_callback_jump_to(jump_to: str) -> str:
-    """Avoid recursively using the SSO callback URL as the next login target."""
-    current = jump_to
-    for _ in range(5):
-        parsed = urlsplit(current)
-        if parsed.path != SSO_CALLBACK_PATH:
-            return current
-        nested = parse_qs(parsed.query).get("jumpto", [""])[0]
-        if not nested or nested == current:
-            break
-        current = nested
-    return "/"
-
-
-def _public_base_from_target(target: str) -> str:
-    """Return the externally visible origin used to build the SSO callback URL."""
-    if PUBLIC_BASE_URL:
-        return PUBLIC_BASE_URL
-    parsed = urlsplit(target)
-    if parsed.scheme and parsed.netloc:
-        return urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
-    return ""
-
-
-def _callback_jump_to(jump_to: str) -> str:
-    """Wrap the original target in our callback so UPM can match the callback URL.
-
-    UPM matches the login ``jumpto`` after stripping query parameters. Therefore
-    the SSO-facing target must be ``/sso/callback``; the real page is carried as
-    the callback's own ``jumpto`` parameter.
-    """
-    target = _unwrap_callback_jump_to(jump_to)
-    base_url = _public_base_from_target(target).rstrip("/")
-    callback_url = f"{base_url}{SSO_CALLBACK_PATH}" if base_url else SSO_CALLBACK_PATH
-    return f"{callback_url}?{urlencode({'jumpto': target})}"
-
-
-TARGET_COOKIE = "_sso_target"
-TARGET_COOKIE_MAX_AGE = 300  # 5 minutes – enough for SSO login
 
 class BrowserLoginRedirectMiddleware(BaseHTTPMiddleware):
     """Turn the SDK's browser-facing 401 JSON response into an SSO redirect."""
@@ -173,72 +114,11 @@ class BrowserLoginRedirectMiddleware(BaseHTTPMiddleware):
             return response
 
         target = _public_request_url(request)
-        login_url = _sso_login_url(target)
-        redirect = RedirectResponse(url=login_url, status_code=302)
-        if target and target != f"{PUBLIC_BASE_URL}/":
-            redirect.set_cookie(
-                TARGET_COOKIE, target,
-                max_age=TARGET_COOKIE_MAX_AGE,
-                httponly=True, samesite="lax",
-            )
-        return redirect
+        login_url = self.sso_service.get_login_url(target)
+        return RedirectResponse(url=login_url, status_code=302)
 
 
 app = FastAPI(title="forecast-sso-sidecar")
-
-
-async def _callback_params(request: Request) -> dict[str, str]:
-    """Read callback parameters from query, form-encoded, or JSON requests."""
-    params = {key: value for key, value in request.query_params.items()}
-    if request.method in {"GET", "HEAD"}:
-        return params
-
-    body = await request.body()
-    if not body:
-        return params
-
-    content_type = request.headers.get("content-type", "")
-    if "application/json" in content_type:
-        try:
-            payload = json.loads(body.decode("utf-8"))
-        except json.JSONDecodeError:
-            return params
-        if isinstance(payload, dict):
-            params.update({str(key): str(value) for key, value in payload.items()})
-        return params
-
-    for key, values in parse_qs(body.decode("utf-8")).items():
-        if values:
-            params[key] = values[-1]
-    return params
-
-
-def _log_callback_state(request: Request, params: dict[str, str], stage: str) -> None:
-    """Log callback diagnostics without leaking ticket/code/token values."""
-    interesting = ["code", "ticket", "token", "access_token", "jumpto"]
-    present = [key for key in interesting if params.get(key)]
-    logger.warning(
-        "sso_callback stage=%s method=%s path=%s keys=%s present=%s content_type=%s",
-        stage,
-        request.method,
-        request.url.path,
-        sorted(params.keys()),
-        present,
-        request.headers.get("content-type", ""),
-    )
-
-
-@app.api_route(SSO_CALLBACK_PATH, methods=["GET", "POST"])
-async def sso_callback(request: Request) -> Response:
-    """Redirect to the original target page after SsoMiddleware has exchanged
-    the OAuth code for a ticket and written the cookie."""
-    target = request.cookies.get(TARGET_COOKIE) or "/"
-    if not target.startswith("http") and not target.startswith("/"):
-        target = "/"
-    logger.info("sso_callback redirecting to %s", target[:200])
-    response = RedirectResponse(url=target, status_code=302)
-    response.delete_cookie(TARGET_COOKIE)
-    return response
 
 
 @app.get("/sso/logout")
@@ -259,15 +139,8 @@ async def sso_logout(request: Request) -> Response:
 async def sso_login(request: Request) -> Response:
     """Explicit login entry point.  Redirects to the SSO gateway login page."""
     target = _public_request_url(request)
-    login_url = _sso_login_url(target)
-    response = RedirectResponse(url=login_url, status_code=302)
-    if target and target != f"{PUBLIC_BASE_URL}/":
-        response.set_cookie(
-            TARGET_COOKIE, target,
-            max_age=TARGET_COOKIE_MAX_AGE,
-            httponly=True, samesite="lax",
-        )
-    return response
+    login_url = sso_service.get_login_url(target)
+    return RedirectResponse(url=login_url, status_code=302)
 
 
 @app.get("/sso/debug-cookie")
