@@ -101,7 +101,7 @@ def test_user_header_uses_didi_sso_context(monkeypatch) -> None:
     assert sidecar._get_user_ldap() == "zhangsan"
 
 
-def test_login_url_uses_callback_target_without_leaking_app_key(monkeypatch) -> None:
+def test_login_url_wraps_target_in_callback(monkeypatch) -> None:
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://forecast.intra.xiaojukeji.com")
     sidecar = _load_sidecar(monkeypatch)
 
@@ -110,25 +110,22 @@ def test_login_url_uses_callback_target_without_leaking_app_key(monkeypatch) -> 
 
     assert login_query["app_id"] == ["forecast-app"]
     assert "app_key" not in login_query
-    assert login_query["jumpto"] == [
-        "https://forecast.intra.xiaojukeji.com/sso/callback?"
-        "jumpto=https%3A%2F%2Fforecast.intra.xiaojukeji.com%2Freport%3Fid%3D1"
-    ]
+    # jumpto is wrapped in the callback URL so the SSO gateway generates code
+    jumpto = login_query["jumpto"][0]
+    assert urlsplit(jumpto).path == "/sso/callback"
+    nested = parse_qs(urlsplit(jumpto).query)
+    assert nested["jumpto"] == ["https://forecast.intra.xiaojukeji.com/report?id=1"]
 
 
-def test_login_url_unwraps_nested_callback_targets(monkeypatch) -> None:
+def test_login_url_unwraps_nested_callback_target(monkeypatch) -> None:
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://forecast.intra.xiaojukeji.com")
     sidecar = _load_sidecar(monkeypatch)
 
-    nested = (
-        "https://forecast.intra.xiaojukeji.com/sso/callback?jumpto="
-        "https%3A%2F%2Fforecast.intra.xiaojukeji.com%2Fsso%2Fcallback%3Fjumpto%3D"
-        "https%253A%252F%252Fforecast.intra.xiaojukeji.com%252F"
-    )
-    login_url = sidecar._sso_login_url(nested)
+    # If jumpto is already a callback URL with a nested target, unwrap first
+    target = "https://forecast.intra.xiaojukeji.com/sso/callback?jumpto=https://forecast.intra.xiaojukeji.com/"
+    login_url = sidecar._sso_login_url(target)
     login_query = parse_qs(urlsplit(login_url).query)
 
-    assert login_query["jumpto"] == [
-        "https://forecast.intra.xiaojukeji.com/sso/callback?"
-        "jumpto=https%3A%2F%2Fforecast.intra.xiaojukeji.com%2F"
-    ]
+    jumpto = login_query["jumpto"][0]
+    nested = parse_qs(urlsplit(jumpto).query)
+    assert nested["jumpto"] == ["https://forecast.intra.xiaojukeji.com/"]

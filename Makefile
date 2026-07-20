@@ -1,7 +1,7 @@
 .PHONY: install run test lint format clean-runtime init-db demo-data didi-example-data \
 	sidecar-dev docker-build docker-push
 
-IMAGE ?= hub.xiaojukeji.com/parkerzhang/forecast:v1
+IMAGE ?= hub.xiaojukeji.com/parkerzhang/forecast:v3
 
 install:
 	uv sync

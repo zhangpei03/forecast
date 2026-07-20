@@ -76,7 +76,14 @@ sso_service = SsoService(
 )
 
 def _sso_login_url(jump_to: str = "") -> str:
-    """Build a browser login URL compatible with the SSO gateway."""
+    """Build a browser login URL compatible with the SSO gateway.
+
+    The ``jumpto`` is wrapped in our callback URL so UPM matches it as the
+    registered callback.  The SSO gateway then generates a ``code`` parameter
+    and redirects to ``/sso/callback?code=...&jumpto=<target>``.
+    SsoMiddleware (Priority 2) exchanges the code for a ticket, writes the
+    cookie, and the callback endpoint redirects to the original target.
+    """
     params = {"app_id": SSO_APP_ID, "version": "1.0"}
     if jump_to:
         params["jumpto"] = _callback_jump_to(jump_to)
@@ -152,15 +159,21 @@ class BrowserLoginRedirectMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
         accepts_html = "text/html" in request.headers.get("accept", "")
         if (
-            request.url.path != SSO_CALLBACK_PATH
-            and request.method in {"GET", "HEAD"}
+            request.method in {"GET", "HEAD"}
             and response.status_code == 401
             and accepts_html
         ):
-            return RedirectResponse(
-                url=self.sso_service.get_login_url(_public_request_url(request)),
-                status_code=302,
-            )
+            if request.url.path == SSO_CALLBACK_PATH:
+                # Callback 401: no valid code or ticket. Extract original
+                # target and retry login once to avoid infinite loops.
+                if request.query_params.get("_retry"):
+                    return response
+                jump_to = request.query_params.get("jumpto") or "/"
+                target = _unwrap_callback_jump_to(jump_to)
+            else:
+                target = _public_request_url(request)
+            login_url = _sso_login_url(target)
+            return RedirectResponse(url=login_url, status_code=302)
         return response
 
 
@@ -210,30 +223,39 @@ def _log_callback_state(request: Request, params: dict[str, str], stage: str) ->
 
 @app.api_route(SSO_CALLBACK_PATH, methods=["GET", "POST"])
 async def sso_callback(request: Request) -> Response:
-    """Accept Stargate callback credentials and write the local ticket cookie."""
-    params = await _callback_params(request)
-    _log_callback_state(request, params, "received")
-    jump_to = params.get("jumpto") or "/"
+    """Redirect to the original target page after SsoMiddleware has exchanged
+    the OAuth code for a ticket and written the cookie."""
+    jump_to = request.query_params.get("jumpto") or "/"
+    target = _unwrap_callback_jump_to(jump_to)
+    logger.info("sso_callback redirecting to %s", target[:200])
+    return RedirectResponse(url=target, status_code=302)
 
-    ticket = params.get("ticket") or params.get("token") or params.get("access_token") or ""
-    code = params.get("code")
-    if code:
-        data = await sso_service.check_code(code)
-        ticket = data.get("ticket", "") if data else ""
-        if not ticket:
-            _log_callback_state(request, params, "check_code_failed")
 
-    if ticket:
-        user = await sso_service.get_user_info(ticket)
-        if user:
-            _log_callback_state(request, params, "authenticated")
-            response = RedirectResponse(url=jump_to, status_code=302)
-            sso_service.set_ticket_cookie(response, ticket)
-            return response
-        _log_callback_state(request, params, "get_user_info_failed")
+@app.get("/sso/logout")
+async def sso_logout(request: Request) -> Response:
+    """Explicit logout entry point for Streamlit sidebar link.
 
-    _log_callback_state(request, params, "missing_or_invalid_credentials")
-    return Response("SSO callback did not include a valid code or ticket.", status_code=401)
+    Returns a redirect to the SSO gateway logout page and clears the local
+    ticket cookie.
+    """
+    referer = request.headers.get("referer", "")
+    logout_url = sso_service.get_logout_url(referer)
+    response = RedirectResponse(url=logout_url, status_code=302)
+    sso_service.remove_ticket_cookie(response)
+    return response
+
+
+@app.get("/sso/login")
+async def sso_login(request: Request) -> Response:
+    """Explicit login entry point for Streamlit sidebar link.
+
+    Redirects the browser to the SSO gateway login page.  The jumpto is
+    wrapped in the callback URL so the gateway generates a code parameter;
+    SsoMiddleware exchanges the code for a ticket on the callback path.
+    """
+    target = _public_request_url(request)
+    login_url = _sso_login_url(target)
+    return RedirectResponse(url=login_url, status_code=302)
 
 
 @app.get("/sso/debug-cookie")
@@ -260,7 +282,7 @@ app.add_middleware(
     mcp_auth=mcp_auth,
     enabled=SSO_ENABLED,
     default_user=default_user,
-    skip_paths=frozenset(["/health", SSO_CALLBACK_PATH, "/openapi.json", "/docs", "/redoc"]),
+    skip_paths=frozenset(["/health", "/sso/login", "/sso/logout", "/openapi.json", "/docs", "/redoc"]),
 )
 # Add after SsoMiddleware: Starlette executes the latest registered middleware first,
 # so this outer layer can convert didi_sso's browser 401 response into a redirect.

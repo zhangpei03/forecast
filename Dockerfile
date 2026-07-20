@@ -17,7 +17,8 @@ ARG BASE_IMAGE=python:3.12-slim-bookworm
 FROM ${BASE_IMAGE} AS builder
 
 ENV UV_LINK_MODE=copy \
-    UV_PYTHON_DOWNLOADS=never
+    UV_PYTHON_DOWNLOADS=never \
+    UV_HTTP_TIMEOUT=300
 
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
@@ -34,7 +35,9 @@ RUN set -eux; \
     echo "Resolved PyPI index: ${INDEX:-<base image default>}"; \
     pip install --no-cache-dir --trusted-host "$PIP_TRUSTED_HOST" ${INDEX:+-i "$INDEX"} "uv>=0.5,<1"; \
     sed -i '/^torch = /d; /^\[\[tool\.uv\.index\]\]/,/^$/d' pyproject.toml; \
-    uv sync --no-dev --allow-insecure-host "$PIP_TRUSTED_HOST" ${INDEX:+--default-index "$INDEX"}
+    uv sync --frozen --no-dev --allow-insecure-host "$PIP_TRUSTED_HOST" ${INDEX:+--default-index "$INDEX"}; \
+    # 瘦身: 删掉 nvidia/CUDA 运行时(amd64 CPU 部署不需要)
+    rm -rf /app/.venv/lib/python3.12/site-packages/nvidia
 
 # ── Stage 2: runtime ──
 FROM ${BASE_IMAGE}
