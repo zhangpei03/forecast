@@ -158,23 +158,23 @@ class BrowserLoginRedirectMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
         response = await call_next(request)
         accepts_html = "text/html" in request.headers.get("accept", "")
-        if (
+        if not (
             request.method in {"GET", "HEAD"}
             and response.status_code == 401
             and accepts_html
         ):
-            if request.url.path == SSO_CALLBACK_PATH:
-                # Callback 401: no valid code or ticket. Extract original
-                # target and retry login once to avoid infinite loops.
-                if request.query_params.get("_retry"):
-                    return response
-                jump_to = request.query_params.get("jumpto") or "/"
-                target = _unwrap_callback_jump_to(jump_to)
-            else:
-                target = _public_request_url(request)
-            login_url = _sso_login_url(target)
-            return RedirectResponse(url=login_url, status_code=302)
-        return response
+            return response
+
+        if request.url.path == SSO_CALLBACK_PATH:
+            # SsoMiddleware already tried code exchange and failed.
+            # Do NOT redirect again — that would create an infinite loop
+            # (gateway would redirect back to callback without code).
+            # Return the 401 so the browser shows the error.
+            return response
+
+        target = _public_request_url(request)
+        login_url = _sso_login_url(target)
+        return RedirectResponse(url=login_url, status_code=302)
 
 
 app = FastAPI(title="forecast-sso-sidecar")
