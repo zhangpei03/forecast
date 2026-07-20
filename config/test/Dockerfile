@@ -1,1 +1,1 @@
-FROM hub.xiaojukeji.com/parkerzhang/python:3.12-slim-bookworm
+FROM hub.xiaojukeji.com/parkerzhang/forecast-base:latest
