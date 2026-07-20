@@ -101,7 +101,7 @@ def test_user_header_uses_didi_sso_context(monkeypatch) -> None:
     assert sidecar._get_user_ldap() == "zhangsan"
 
 
-def test_login_url_wraps_target_in_callback(monkeypatch) -> None:
+def test_login_url_uses_callback_path(monkeypatch) -> None:
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://forecast.intra.xiaojukeji.com")
     sidecar = _load_sidecar(monkeypatch)
 
@@ -110,22 +110,21 @@ def test_login_url_wraps_target_in_callback(monkeypatch) -> None:
 
     assert login_query["app_id"] == ["forecast-app"]
     assert "app_key" not in login_query
-    # jumpto is wrapped in the callback URL so the SSO gateway generates code
+    # jumpto is the bare callback URL — SSO gateway matches it and generates code
     jumpto = login_query["jumpto"][0]
-    assert urlsplit(jumpto).path == "/sso/callback"
-    nested = parse_qs(urlsplit(jumpto).query)
-    assert nested["jumpto"] == ["https://forecast.intra.xiaojukeji.com/report?id=1"]
+    assert jumpto == "https://forecast.intra.xiaojukeji.com/sso/callback"
+    # No nested jumpto wrapping
+    assert "jumpto" not in parse_qs(urlsplit(jumpto).query)
 
 
-def test_login_url_unwraps_nested_callback_target(monkeypatch) -> None:
+def test_login_url_ignores_nested_callback(monkeypatch) -> None:
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://forecast.intra.xiaojukeji.com")
     sidecar = _load_sidecar(monkeypatch)
 
-    # If jumpto is already a callback URL with a nested target, unwrap first
+    # jumpto is always the bare callback URL, regardless of the input target
     target = "https://forecast.intra.xiaojukeji.com/sso/callback?jumpto=https://forecast.intra.xiaojukeji.com/"
     login_url = sidecar._sso_login_url(target)
     login_query = parse_qs(urlsplit(login_url).query)
 
     jumpto = login_query["jumpto"][0]
-    nested = parse_qs(urlsplit(jumpto).query)
-    assert nested["jumpto"] == ["https://forecast.intra.xiaojukeji.com/"]
+    assert jumpto == "https://forecast.intra.xiaojukeji.com/sso/callback"

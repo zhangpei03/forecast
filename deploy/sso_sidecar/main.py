@@ -78,15 +78,16 @@ sso_service = SsoService(
 def _sso_login_url(jump_to: str = "") -> str:
     """Build a browser login URL compatible with the SSO gateway.
 
-    The ``jumpto`` is wrapped in our callback URL so UPM matches it as the
-    registered callback.  The SSO gateway then generates a ``code`` parameter
-    and redirects to ``/sso/callback?code=...&jumpto=<target>``.
-    SsoMiddleware (Priority 2) exchanges the code for a ticket, writes the
-    cookie, and the callback endpoint redirects to the original target.
+    The ``jumpto`` is the registered callback path (``/sso/callback``).
+    The SSO gateway matches it against registered callbacks and generates
+    a ``code`` parameter on redirect.
+    The original target page is stashed in a short-lived cookie so the
+    callback handler can redirect there after code exchange.
     """
     params = {"app_id": SSO_APP_ID, "version": "1.0"}
     if jump_to:
-        params["jumpto"] = _callback_jump_to(jump_to)
+        callback = f"{PUBLIC_BASE_URL}{SSO_CALLBACK_PATH}" if PUBLIC_BASE_URL else SSO_CALLBACK_PATH
+        params["jumpto"] = callback
     return f"{SSO_HOST}{SSO_LOGIN_PATH}?{urlencode(params)}"
 
 
@@ -148,6 +149,9 @@ def _callback_jump_to(jump_to: str) -> str:
     return f"{callback_url}?{urlencode({'jumpto': target})}"
 
 
+TARGET_COOKIE = "_sso_target"
+TARGET_COOKIE_MAX_AGE = 300  # 5 minutes – enough for SSO login
+
 class BrowserLoginRedirectMiddleware(BaseHTTPMiddleware):
     """Turn the SDK's browser-facing 401 JSON response into an SSO redirect."""
 
@@ -166,15 +170,18 @@ class BrowserLoginRedirectMiddleware(BaseHTTPMiddleware):
             return response
 
         if request.url.path == SSO_CALLBACK_PATH:
-            # SsoMiddleware already tried code exchange and failed.
-            # Do NOT redirect again — that would create an infinite loop
-            # (gateway would redirect back to callback without code).
-            # Return the 401 so the browser shows the error.
             return response
 
         target = _public_request_url(request)
         login_url = _sso_login_url(target)
-        return RedirectResponse(url=login_url, status_code=302)
+        redirect = RedirectResponse(url=login_url, status_code=302)
+        if target and target != f"{PUBLIC_BASE_URL}/":
+            redirect.set_cookie(
+                TARGET_COOKIE, target,
+                max_age=TARGET_COOKIE_MAX_AGE,
+                httponly=True, samesite="lax",
+            )
+        return redirect
 
 
 app = FastAPI(title="forecast-sso-sidecar")
@@ -225,10 +232,13 @@ def _log_callback_state(request: Request, params: dict[str, str], stage: str) ->
 async def sso_callback(request: Request) -> Response:
     """Redirect to the original target page after SsoMiddleware has exchanged
     the OAuth code for a ticket and written the cookie."""
-    jump_to = request.query_params.get("jumpto") or "/"
-    target = _unwrap_callback_jump_to(jump_to)
+    target = request.cookies.get(TARGET_COOKIE) or "/"
+    if not target.startswith("http") and not target.startswith("/"):
+        target = "/"
     logger.info("sso_callback redirecting to %s", target[:200])
-    return RedirectResponse(url=target, status_code=302)
+    response = RedirectResponse(url=target, status_code=302)
+    response.delete_cookie(TARGET_COOKIE)
+    return response
 
 
 @app.get("/sso/logout")
@@ -247,15 +257,17 @@ async def sso_logout(request: Request) -> Response:
 
 @app.get("/sso/login")
 async def sso_login(request: Request) -> Response:
-    """Explicit login entry point for Streamlit sidebar link.
-
-    Redirects the browser to the SSO gateway login page.  The jumpto is
-    wrapped in the callback URL so the gateway generates a code parameter;
-    SsoMiddleware exchanges the code for a ticket on the callback path.
-    """
+    """Explicit login entry point.  Redirects to the SSO gateway login page."""
     target = _public_request_url(request)
     login_url = _sso_login_url(target)
-    return RedirectResponse(url=login_url, status_code=302)
+    response = RedirectResponse(url=login_url, status_code=302)
+    if target and target != f"{PUBLIC_BASE_URL}/":
+        response.set_cookie(
+            TARGET_COOKIE, target,
+            max_age=TARGET_COOKIE_MAX_AGE,
+            httponly=True, samesite="lax",
+        )
+    return response
 
 
 @app.get("/sso/debug-cookie")
